@@ -1,0 +1,91 @@
+' iLogic Rule: SyncBOMItemNumbers
+
+' Verifica se o documento ativo é um assembly válido
+Sub main ()
+If ThisApplication.ActiveDocument Is Nothing OrElse _
+   ThisApplication.ActiveDocument.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+    MessageBox.Show("Este script requer um documento de montagem ativo com BOM estruturado configurado para todos os níveis.", "Erro")
+    Return
+End If
+
+Dim oDoc As AssemblyDocument = ThisApplication.ActiveDocument
+Dim oBOM As BOM = oDoc.ComponentDefinition.BOM
+
+If Not oBOM.StructuredViewEnabled Or oBOM.StructuredViewFirstLevelOnly Then
+    MessageBox.Show("A visualização estruturada da BOM deve estar habilitada e configurada para todos os níveis.", "Erro")
+    Return
+End If
+
+Dim oStructView As BOMView = GetStructView(oBOM)
+If oStructView Is Nothing Then
+    MessageBox.Show("Não foi possível obter a visualização estruturada da BOM. Verifique se o Level of Detail 'Master' está ativo.", "Erro")
+    Return
+End If
+
+For Each oRow As BOMRow In oStructView.BOMRows
+    If oRow.ChildRows IsNot Nothing Then
+        UpdateItemNumbers(oRow, oBOM.StructuredViewDelimiter)
+    End If
+Next
+End Sub
+
+
+'--- Sub-rotinas e funções auxiliares ---'
+
+Sub UpdateItemNumbers(oInputRow As BOMRow, sDelim As String)
+    If oInputRow.ChildRows Is Nothing Then Return
+
+    Dim oSubBOM As BOM = oInputRow.ComponentDefinitions(1).BOM
+    Dim oSubStructView As BOMView = GetStructView(oSubBOM)
+    If oSubStructView Is Nothing Then Return
+
+    For Each oSubRow As BOMRow In oInputRow.ChildRows
+        Dim oSubBOMRow As BOMRow = FindRow(oSubStructView, oSubRow)
+
+        If oSubBOMRow IsNot Nothing Then
+            If oSubRow.ChildRows IsNot Nothing Then
+                ModifyAssemblyItemNumber(oSubRow, oSubBOMRow, sDelim)
+            Else
+                oSubRow.ItemNumber = oSubBOMRow.ItemNumber
+            End If
+        End If
+
+        If oSubRow.ChildRows IsNot Nothing Then
+            UpdateItemNumbers(oSubRow, sDelim)
+        End If
+    Next
+End Sub
+
+Function GetStructView(oBOM As BOM) As BOMView
+    For Each view As BOMView In oBOM.BOMViews
+        If View.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+            Return View
+        End If
+    Next
+    Return Nothing
+End Function
+
+Function MatchRows(oRow1 As BOMRow, oRow2 As BOMRow) As Boolean
+    If oRow1.ComponentDefinitions.Count <> oRow2.ComponentDefinitions.Count Then Return False
+
+    For i As Integer = 1 To oRow1.ComponentDefinitions.Count
+        If oRow1.ComponentDefinitions(i).Document.FullDocumentName <> oRow2.ComponentDefinitions(i).Document.FullDocumentName Then
+            Return False
+        End If
+    Next
+    Return True
+End Function
+
+Function FindRow(oBOMView As BOMView, oInputRow As BOMRow) As BOMRow
+    For Each oRow As BOMRow In oBOMView.BOMRows
+        If MatchRows(oInputRow, oRow) Then
+            Return oRow
+        End If
+    Next
+    Return Nothing
+End Function
+
+Sub ModifyAssemblyItemNumber(oDestRow As BOMRow, oSrcRow As BOMRow, sDelim As String)
+    Dim sItem As String = oDestRow.Parent.ItemNumber & sDelim & oSrcRow.ItemNumber
+    oDestRow.ItemNumber = sItem
+End Sub
