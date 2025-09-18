@@ -1,0 +1,103 @@
+' ==========================================================
+' Título: Sincronização e Ordenação de Números de Item na BOM Estruturada
+' Descrição: Atualiza e reordena os números de item da BOM estruturada (todos os níveis),
+'            sincronizando com submontagens recursivamente e preservando a ordem visual.
+
+' ==========================================================
+Sub Main
+	
+	
+If ThisApplication.ActiveDocument Is Nothing OrElse _
+   ThisApplication.ActiveDocument.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+    MessageBox.Show("Este script requer um documento de montagem ativo com BOM estruturado habilitado (All Levels).", "Erro")
+    Return
+End If
+
+Dim oDoc As AssemblyDocument = ThisApplication.ActiveDocument
+Dim oBOM As BOM = oDoc.ComponentDefinition.BOM
+
+If Not oBOM.StructuredViewEnabled Or oBOM.StructuredViewFirstLevelOnly Then
+    MessageBox.Show("A visualização estruturada da BOM deve estar habilitada e configurada para todos os níveis.", "Erro")
+    Return
+End If
+
+Dim oStructView As BOMView = GetStructView(oBOM)
+If oStructView Is Nothing Then
+    MessageBox.Show("Não foi possível acessar a BOM estruturada. Verifique se o Level of Detail 'Master' está ativo.", "Erro")
+    Return
+End If
+
+' Começa sincronização e ordenação
+For Each oRow As BOMRow In oStructView.BOMRows
+    If oRow.ChildRows IsNot Nothing Then
+        UpdateItemNumbersAndOrder (oRow, oBOM.StructuredViewDelimiter)
+    End If
+Next
+End Sub
+
+
+' === SUBROTINAS ===
+
+Sub UpdateItemNumbersAndOrder(oInputRow As BOMRow, sDelim As String)
+    If oInputRow.ChildRows Is Nothing Then Return
+
+    Dim oSubDef As ComponentDefinition = oInputRow.ComponentDefinitions(1)
+    Dim oSubBOM As BOM = oSubDef.BOM
+    Dim oSubStructView As BOMView = GetStructView(oSubBOM)
+    If oSubStructView Is Nothing Then Return
+
+    Dim index As Integer = 1
+
+    For Each oSubRow As BOMRow In oInputRow.ChildRows
+        Dim oSubBOMRow As BOMRow = FindRow(oSubStructView, oSubRow)
+
+        If oSubBOMRow IsNot Nothing Then
+            Dim itemNum As String = CStr(index)
+            If oSubRow.ChildRows IsNot Nothing Then
+                ' Montagem: concatenar com o número pai
+                itemNum = oSubRow.Parent.ItemNumber & sDelim & itemNum
+                oSubRow.ItemNumber = itemNum
+            Else
+                ' Peça: item simples
+                oSubRow.ItemNumber = itemNum
+            End If
+
+            ' Também atualiza na sub-BOM original para manter consistência
+            oSubBOMRow.ItemNumber = index.ToString()
+        End If
+
+        If oSubRow.ChildRows IsNot Nothing Then
+            UpdateItemNumbersAndOrder(oSubRow, sDelim)
+        End If
+
+        index += 1
+    Next
+End Sub
+
+Function GetStructView(oBOM As BOM) As BOMView
+    For Each view As BOMView In oBOM.BOMViews
+        If View.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+            Return View
+        End If
+    Next
+    Return Nothing
+End Function
+
+Function MatchRows(oRow1 As BOMRow, oRow2 As BOMRow) As Boolean
+    If oRow1.ComponentDefinitions.Count <> oRow2.ComponentDefinitions.Count Then Return False
+    For i As Integer = 1 To oRow1.ComponentDefinitions.Count
+        If oRow1.ComponentDefinitions(i).Document.FullDocumentName <> oRow2.ComponentDefinitions(i).Document.FullDocumentName Then
+            Return False
+        End If
+    Next
+    Return True
+End Function
+
+Function FindRow(oBOMView As BOMView, oInputRow As BOMRow) As BOMRow
+    For Each oRow As BOMRow In oBOMView.BOMRows
+        If MatchRows(oInputRow, oRow) Then
+            Return oRow
+        End If
+    Next
+    Return Nothing
+End Function
