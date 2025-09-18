@@ -1,0 +1,69 @@
+' =============================================
+' Título: Sincronização de BOM estruturada com preservação da ordem das submontagens
+' Descrição: Atualiza visualmente os números de item na BOM estruturada (All Levels),
+'            mantendo a ordem das submontagens e evitando sobrescrita.
+' =============================================
+
+Sub Main()
+    ' Verifica se o documento ativo é uma montagem
+    If ThisApplication.ActiveDocument Is Nothing OrElse _
+       ThisApplication.ActiveDocument.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+        MessageBox.Show("Abra um documento de montagem com BOM estruturado habilitado (All Levels).", "Erro")
+        Return
+    End If
+
+    ' Define o documento e BOM principal
+    Dim oDoc As AssemblyDocument = ThisApplication.ActiveDocument
+    Dim oBOM As BOM = oDoc.ComponentDefinition.BOM
+
+    ' Verifica se a visualização estruturada está habilitada e para todos os níveis
+    If Not oBOM.StructuredViewEnabled Or oBOM.StructuredViewFirstLevelOnly Then
+        MessageBox.Show("A BOM estruturada deve estar habilitada para todos os níveis.", "Erro")
+        Return
+    End If
+
+    ' Obtém a visualização estruturada
+    Dim oStructView As BOMView = GetStructuredView(oBOM)
+    If oStructView Is Nothing Then
+        MessageBox.Show("Não foi possível acessar a BOM estruturada. Verifique se o Level of Detail 'Master' está ativo.", "Erro")
+        Return
+    End If
+
+    ' Inicia a sincronização a partir do primeiro nível
+    Dim itemIndex As Integer = 1
+    For Each oRow As BOMRow In oStructView.BOMRows
+        Dim visualItemNumber As String = CStr(itemIndex)
+        oRow.ItemNumber = visualItemNumber
+        UpdateChildRows oRow, visualItemNumber, oBOM.StructuredViewDelimiter
+        itemIndex += 1
+    Next
+End Sub
+
+' === Subrotina principal recursiva ===
+Sub UpdateChildRows(oParentRow As BOMRow, parentItemNumber As String, delimiter As String)
+    If oParentRow.ChildRows Is Nothing Then Exit Sub
+
+    Dim childIndex As Integer = 1
+    For Each oChildRow As BOMRow In oParentRow.ChildRows
+        ' Gera número de item visual baseado na hierarquia (não sobrescreve número real da submontagem)
+        Dim visualItemNumber As String = parentItemNumber & delimiter & CStr(childIndex)
+        oChildRow.ItemNumber = visualItemNumber
+
+        ' Chamada recursiva para processar filhos (se houver)
+        If oChildRow.ChildRows IsNot Nothing Then
+            UpdateChildRows oChildRow, visualItemNumber, delimiter
+        End If
+
+        childIndex += 1
+    Next
+End Sub
+
+' === Função para obter a visualização estruturada da BOM ===
+Function GetStructuredView(oBOM As BOM) As BOMView
+    For Each view As BOMView In oBOM.BOMViews
+        If view.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+            Return view
+        End If
+    Next
+    Return Nothing
+End Function
