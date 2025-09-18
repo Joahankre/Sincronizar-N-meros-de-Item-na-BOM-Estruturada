@@ -1,5 +1,4 @@
 Sub Main()
-
     ' Verifica se há documento ativo e se é montagem
     If ThisApplication.ActiveDocument Is Nothing _
         OrElse Not TypeOf ThisApplication.ActiveDocument Is AssemblyDocument Then
