@@ -1,0 +1,156 @@
+' ================================================
+' Título: Sincronizar números de item da BOM estruturada
+' Autor: Adaptado por ChatGPT
+' Descrição:
+' Este código atualiza os números de item da BOM estruturada
+' de uma montagem, sincronizando-os com as submontagens.
+' Considera componentes virtuais e corrige comportamento inconsistente da API.
+' ================================================
+
+Sub Main()
+    ' Verifica se o documento ativo é uma montagem
+    If ThisApplication.ActiveDocument Is Nothing OrElse _
+       Not TypeOf ThisApplication.ActiveDocument Is AssemblyDocument Then
+        MessageBox.Show("Este código requer um documento de montagem ativo.", "Erro")
+        Exit Sub
+    End If
+
+    ' Inicia uma transação para agrupar alterações
+    Dim transMgr As TransactionManager = ThisApplication.TransactionManager
+    Dim trans As Transaction = transMgr.StartTransaction(ThisApplication.ActiveDocument, "Sincronizar BOM")
+
+    ' Define referências principais
+    Dim doc As AssemblyDocument = ThisApplication.ActiveDocument
+    Dim bom As BOM = doc.ComponentDefinition.BOM
+
+    ' Garante que a BOM estruturada esteja habilitada para todos os níveis
+    bom.StructuredViewEnabled = True
+    bom.StructuredViewFirstLevelOnly = False
+    bom.StructuredViewDelimiter = "."
+
+    ' Obtém a visualização estruturada da BOM
+    Dim bomView As BOMView = Nothing
+    Try
+        bomView = bom.BOMViews("Structured")
+    Catch
+        MessageBox.Show("Não foi possível acessar a visualização 'Structured'. Verifique se o LOD 'Master' está ativo.", "Erro")
+        trans.End()
+        Exit Sub
+    End Try
+
+    ' Verifica se conseguiu acessar a visualização estruturada
+    If bomView Is Nothing Then
+        MessageBox.Show("BOM estruturada não encontrada.", "Erro")
+        trans.End()
+        Exit Sub
+    End If
+
+    ' Percorre as linhas principais da BOM
+    For Each row As BOMRow In bomView.BOMRows
+        If Not row.ChildRows Is Nothing Then
+            AtualizarNumerosItem(row, bom.StructuredViewDelimiter)
+        End If
+    Next
+
+    ' Ordena visualmente por número de item (opcional)
+    bomView.Sort("Item")
+
+    ' Finaliza transação
+    trans.End()
+
+    MessageBox.Show("Sincronização de números de item concluída com sucesso.", "Concluído")
+End Sub
+
+' === Atualiza recursivamente os números de item nas submontagens ===
+Sub AtualizarNumerosItem(rowPai As BOMRow, delimitador As String)
+    If rowPai.ChildRows Is Nothing Then Exit Sub
+
+    ' Tenta acessar a BOM da submontagem
+    Dim bomSub As BOM
+    Try
+        bomSub = rowPai.ComponentDefinitions(1).BOM
+    Catch
+        Exit Sub
+    End Try
+
+    ' Habilita a visualização estruturada da submontagem, se necessário
+    If Not bomSub.StructuredViewEnabled Then
+        Try
+            bomSub.StructuredViewEnabled = True
+        Catch
+            GoTo ProximaLinha
+        End Try
+    End If
+
+    Dim viewSub As BOMView
+    Try
+        viewSub = bomSub.BOMViews("Structured")
+    Catch
+        Exit Sub
+    End Try
+
+    If viewSub Is Nothing Then Exit Sub
+
+    ' Percorre os filhos da linha pai
+    For Each rowFilho As BOMRow In rowPai.ChildRows
+        ' Encontra a linha correspondente na submontagem
+        Dim rowCorrespondente As BOMRow = EncontrarLinha(viewSub, rowFilho)
+
+        If Not rowCorrespondente Is Nothing Then
+            If Not rowFilho.ChildRows Is Nothing Then
+                ' Submontagem: aplicar workaround da API
+                DefinirNumeroItemMontagem(rowFilho, rowCorrespondente, delimitador)
+            ElseIf TypeOf rowFilho.ComponentDefinitions(1) Is VirtualComponentDefinition Then
+                rowFilho.ItemNumber = rowCorrespondente.ItemNumber
+            Else
+                rowFilho.ItemNumber = rowCorrespondente.ItemNumber
+            End If
+        End If
+
+        ' Chamada recursiva para filhos
+        If Not rowFilho.ChildRows Is Nothing Then
+            AtualizarNumerosItem(rowFilho, delimitador)
+        End If
+    Next
+
+ProximaLinha:
+End Sub
+
+' === Compara duas linhas de BOM para verificar se representam o mesmo componente ===
+Function CompararLinhas(row1 As BOMRow, row2 As BOMRow) As Boolean
+    If row1.ComponentDefinitions.Count <> row2.ComponentDefinitions.Count Then
+        Return False
+    End If
+
+    For i As Integer = 1 To row1.ComponentDefinitions.Count
+        If row1.ComponentDefinitions(i).Document.FullDocumentName <> _
+           row2.ComponentDefinitions(i).Document.FullDocumentName Then
+            Return False
+        End If
+    Next
+
+    ' Tratamento especial para componentes virtuais
+    If TypeOf row1.ComponentDefinitions(1) Is VirtualComponentDefinition Then
+        Dim partNum1 As String = row1.ComponentDefinitions(1).PropertySets("Design Tracking Properties").Item("Part Number").Value
+        Dim partNum2 As String = row2.ComponentDefinitions(1).PropertySets("Design Tracking Properties").Item("Part Number").Value
+        If partNum1 <> partNum2 Then Return False
+    End If
+
+    Return True
+End Function
+
+' === Procura a linha correspondente em outra BOMView ===
+Function EncontrarLinha(view As BOMView, rowReferencia As BOMRow) As BOMRow
+    For Each linha As BOMRow In view.BOMRows
+        If CompararLinhas(rowReferencia, linha) Then
+            Return linha
+        End If
+    Next
+    Return Nothing
+End Function
+
+' === Corrige a numeração de submontagens (limitação da API) ===
+Sub DefinirNumeroItemMontagem(rowDestino As BOMRow, rowFonte As BOMRow, delimitador As String)
+    Dim numeroPai As String = rowDestino.Parent.ItemNumber
+    rowDestino.ItemNumber = numeroPai & delimitador & rowFonte.ItemNumber
+End Sub
