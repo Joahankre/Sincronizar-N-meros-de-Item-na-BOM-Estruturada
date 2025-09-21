@@ -1,0 +1,198 @@
+' ================================================
+' Regra iLogic: Transferir ordem visual do pai para submontagens (reordenação)
+' Autor: ChatGPT
+' Objetivo: 
+'   Aplicar a ordem visual manual da montagem pai dentro de todas as submontagens,
+'   de modo que cada submontagem tenha sua própria BOM reordenada de acordo.
+' Requisitos:
+'   – Montagem ativa com Structured BOM habilitada e para todos os níveis
+'   – Permissão para salvar submontagens
+'   – Nome da coluna “Item” existente no view da BOM para ordenação
+' ================================================
+
+Sub Main()
+
+    ' Verifica se documento ativo é montagem (Assembly)
+    If ThisApplication.ActiveDocument Is Nothing OrElse _
+       Not TypeOf ThisApplication.ActiveDocument Is AssemblyDocument Then
+        MessageBox.Show("Erro: documento ativo deve ser uma montagem (Assembly).", "Erro")
+        Exit Sub
+    End If
+
+    Dim asmPai As AssemblyDocument = CType(ThisApplication.ActiveDocument, AssemblyDocument)
+    Dim bomPai As BOM = asmPai.ComponentDefinition.BOM
+
+    ' Habilitar vista estruturada para todos os níveis
+    bomPai.StructuredViewEnabled = True
+    bomPai.StructuredViewFirstLevelOnly = False
+
+    ' Obter a vista estruturada
+    Dim viewPai As BOMView = GetStructuredView(bomPai)
+    If viewPai Is Nothing Then
+        MessageBox.Show("Vista Structured BOM não encontrada. Verifique se o LOD Master está ativo.", "Erro")
+        Exit Sub
+    End If
+
+    ' Captura ordem visual manual atual do pai (item “ItemNumber” ou posição visual)
+    Dim ordemVisualPai As New List(Of String)
+    For Each rPai As BOMRow In viewPai.BOMRows
+        ordemVisualPai.Add(GetIdentificador(rPai))
+    Next
+
+    ' Reordena montagem pai para "Item" para garantir base consistente
+    Try
+        viewPai.Sort("Item", True)
+    Catch ex As Exception
+        MessageBox.Show("Não foi possível ordenar montagem pai pela coluna 'Item': " & ex.Message, "Aviso")
+    End Try
+
+    viewPai.Renumber(1, 1)
+
+    ' Processa submontagens recursivamente
+    Dim arquivosProcessados As New System.Collections.Generic.HashSet(Of String)
+    AplicarOrdemVisual(asmPai, ordemVisualPai, arquivosProcessados)
+
+    ' Salvar montagem pai
+    Try
+        asmPai.Save()
+    Catch ex As Exception
+        MessageBox.Show("Falha ao salvar montagem pai: " & asmPai.FullFileName & vbCrLf & ex.Message, "Erro Salvamento")
+    End Try
+
+    MessageBox.Show("Ordem visual propagada para todas as submontagens.", "Concluído")
+
+End Sub
+
+' ------------------------------------------------
+' Função recursiva que aplica a ordem visual do pai a cada submontagem
+Sub AplicarOrdemVisual(asmAtual As AssemblyDocument, ordemPai As List(Of String), processed As System.Collections.Generic.HashSet(Of String))
+
+    ' Habilitar BOM estruturada nesta montagem
+    Dim bomAtual As BOM = asmAtual.ComponentDefinition.BOM
+    bomAtual.StructuredViewEnabled = True
+    bomAtual.StructuredViewFirstLevelOnly = False
+
+    Dim viewAtual As BOMView = GetStructuredView(bomAtual)
+    If viewAtual Is Nothing Then Exit Sub
+
+    ' Itera sobre cada linha da BOM atual
+    For Each rPai As BOMRow In viewAtual.BOMRows
+        If rPai.ChildRows IsNot Nothing Then
+            ' Obter documento da submontagem
+            Dim docSub As Document = Nothing
+            Try
+                docSub = rPai.ComponentDefinitions(1).Document
+            Catch
+                Continue For
+            End Try
+
+            If TypeOf docSub Is AssemblyDocument Then
+                Dim asmSub As AssemblyDocument = CType(docSub, AssemblyDocument)
+                Dim caminhoSub As String = asmSub.FullFileName
+
+                If Not processed.Contains(caminhoSub) Then
+                    processed.Add(caminhoSub)
+
+                    ' Captura ordem visual dos filhos do pai para este nível
+                    Dim ordemFilhosPai As New List(Of String)
+                    For Each rc As BOMRow In rPai.ChildRows
+                        ordemFilhosPai.Add(GetIdentificador(rc))
+                    Next
+
+                    ' Prepara submontagem
+                    Dim bomSub As BOM = asmSub.ComponentDefinition.BOM
+                    bomSub.StructuredViewEnabled = True
+                    bomSub.StructuredViewFirstLevelOnly = False
+
+                    Dim viewSub As BOMView = GetStructuredView(bomSub)
+                    If viewSub IsNot Nothing Then
+                        ' Reordenar submontagem para seguir ordemFilhosPai
+                        Try
+                            viewSub.Sort("Item", True)
+                        Catch ex As Exception
+                            ' Se não existir coluna “Item”, avisa e ignora
+                            MessageBox.Show("Aviso: coluna 'Item' não encontrada na submontagem " & asmSub.FullFileName & ". Ordem visual pai sera usada para renumeração sola.", "Aviso")
+                        End Try
+
+                        ' Reordenar manualmente linhas conforme ordem visual do pai
+                        ReordenarConformeOrdem(viewSub, ordemFilhosPai)
+
+                        viewSub.Renumber(1, 1)
+
+                        ' Salvar submontagem
+                        Try
+                            asmSub.Save()
+                        Catch ex As Exception
+                            MessageBox.Show("Falha ao salvar submontagem: " & asmSub.FullFileName & vbCrLf & ex.Message, "Erro")
+                        End Try
+
+                        ' Recursão nos níveis abaixo
+                        AplicarOrdemVisual(asmSub, ordemFilhosPai, processed)
+                    End If
+
+                End If
+
+            End If
+
+        End If
+    Next
+
+End Sub
+
+' ------------------------------------------------
+' Realiza reordenação manual das linhas de uma view segundo lista de identificadores
+Sub ReordenarConformeOrdem(viewSub As BOMView, ordemPai As List(Of String))
+    ' Coleta todas linhas da view
+    Dim lista As New List(Of BOMRow)
+    For Each r As BOMRow In viewSub.BOMRows
+        lista.Add(r)
+    Next
+
+    ' Ordena lista segundo índice na ordemPai
+    lista.Sort(Function(a As BOMRow, b As BOMRow) As Integer
+                   Dim ida As String = GetIdentificador(a)
+                   Dim idb As String = GetIdentificador(b)
+                   Dim idxA As Integer = ordemPai.IndexOf(ida)
+                   Dim idxB As Integer = ordemPai.IndexOf(idb)
+
+                   If idxA < 0 AndAlso idxB < 0 Then
+                       Return 0
+                   ElseIf idxA < 0 Then
+                       Return 1
+                   ElseIf idxB < 0 Then
+                       Return -1
+                   Else
+                       Return idxA.CompareTo(idxB)
+                   End If
+               End Function)
+
+    ' Aplicar nova ordem visual via renumeração de ItemNumber
+    Dim cont As Integer = 1
+    For Each r In lista
+        r.ItemNumber = CStr(cont)
+        cont += 1
+    Next
+End Sub
+
+' ------------------------------------------------
+' Identificador de linha para correspondência
+Function GetIdentificador(r As BOMRow) As String
+    Dim id As String
+    Try
+        id = r.ComponentDefinitions(1).PropertySets("Design Tracking Properties").Item("Part Number").Value
+    Catch
+        id = r.ComponentDefinitions(1).Document.DisplayName
+    End Try
+    Return id
+End Function
+
+' ------------------------------------------------
+' Obtém a vista estruturada (Structured) de uma BOM
+Function GetStructuredView(bom As BOM) As BOMView
+    For Each v As BOMView In bom.BOMViews
+        If v.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+            Return v
+        End If
+    Next
+    Return Nothing
+End Function
