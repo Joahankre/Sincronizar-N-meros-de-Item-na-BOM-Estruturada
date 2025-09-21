@@ -1,0 +1,116 @@
+Sub Main()
+    Dim oDoc As AssemblyDocument = TryCast(ThisApplication.ActiveDocument, AssemblyDocument)
+    If oDoc Is Nothing Then
+        MsgBox("Abra uma montagem antes de executar.")
+        Exit Sub
+    End If
+
+    ' Dicionário global: caminho do arquivo => ItemNumber
+    Dim itemNumberMap As New Dictionary(Of String, String)
+
+    ' Inicia varredura recursiva pelas submontagens
+    ProcessSubAssembly(oDoc, itemNumberMap)
+
+    ' Aplica os ItemNumbers na montagem principal
+    Dim oBOM As BOM = oDoc.ComponentDefinition.BOM
+    oBOM.StructuredViewEnabled = True
+    oBOM.StructuredViewFirstLevelOnly = False
+
+    Dim oView As BOMView = Nothing
+    For Each v As BOMView In oBOM.BOMViews
+        If v.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+            oView = v
+            Exit For
+        End If
+    Next
+    If oView Is Nothing Then
+        MsgBox("BOM estruturada não encontrada.")
+        Exit Sub
+    End If
+
+    ' Aplica os ItemNumbers do mapa na montagem principal
+    For Each row As BOMRow In oView.BOMRows
+        Try
+            Dim key As String = GetRowKey(row)
+            If itemNumberMap.ContainsKey(key) Then
+                row.ItemNumber = itemNumberMap(key)
+            End If
+        Catch
+            ' ignora erros de atribuição
+        End Try
+    Next
+
+    ' Salva a montagem principal
+    Try
+        oDoc.Save()
+    Catch
+        MsgBox("Falha ao salvar o documento principal.")
+    End Try
+
+    MsgBox("ItemNumbers atualizados com base nas submontagens.")
+End Sub
+
+' === Função recursiva que coleta os ItemNumbers das submontagens ===
+Sub ProcessSubAssembly(doc As AssemblyDocument, ByRef itemMap As Dictionary(Of String, String))
+    Dim bom As BOM = doc.ComponentDefinition.BOM
+    bom.StructuredViewEnabled = True
+    bom.StructuredViewFirstLevelOnly = False
+
+    Dim view As BOMView = Nothing
+    For Each v As BOMView In bom.BOMViews
+        If v.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+            view = v
+            Exit For
+        End If
+    Next
+    If view Is Nothing Then Exit Sub
+
+    For Each row As BOMRow In view.BOMRows
+        Dim key As String = GetRowKey(row)
+
+        ' Salva ItemNumber apenas se ainda não mapeado e for válido
+        If Not itemMap.ContainsKey(key) Then
+            Dim itemNum As String = row.ItemNumber
+            If Not String.IsNullOrEmpty(itemNum) Then
+                itemMap.Add(key, itemNum)
+            End If
+        End If
+
+        ' Se o item for submontagem, processar recursivamente
+        If row.ChildRows IsNot Nothing AndAlso row.ComponentDefinitions.Count > 0 Then
+            Dim subDoc As AssemblyDocument = TryGetSubAssemblyDoc(row)
+            If subDoc IsNot Nothing Then
+                ProcessSubAssembly(subDoc, itemMap)
+            End If
+        End If
+    Next
+End Sub
+
+' === Função para obter a chave única de um componente ===
+Function GetRowKey(row As BOMRow) As String
+    Try
+        Return row.ComponentDefinitions(1).Document.FullFileName.ToLower()
+    Catch
+        Return ""
+    End Try
+End Function
+
+' === Abre ou usa o documento da submontagem ===
+Function TryGetSubAssemblyDoc(row As BOMRow) As AssemblyDocument
+    Try
+        If row.ComponentDefinitions.Count = 0 Then Return Nothing
+        Dim path As String = row.ComponentDefinitions(1).Document.FullFileName
+        If String.IsNullOrEmpty(path) Then Return Nothing
+
+        Dim doc As Document
+        Try
+            doc = ThisApplication.Documents.Item(path)
+        Catch
+            doc = ThisApplication.Documents.Open(path, True)
+        End Try
+
+        Return TryCast(doc, AssemblyDocument)
+    Catch
+        Return Nothing
+    End Try
+End Function
