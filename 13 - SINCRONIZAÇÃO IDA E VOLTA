@@ -1,0 +1,246 @@
+' iLogic – Sincronização e alinhamento de ItemNumbers
+' 3 modos: (1) Principal → Submontagens, (2) Bidirecional, (3) Alinhar ordem dos filhos
+
+Sub Main()
+    Dim oDoc As AssemblyDocument = TryCast(ThisApplication.ActiveDocument, AssemblyDocument)
+    If oDoc Is Nothing Then
+        MsgBox("Abra uma montagem antes de executar.")
+        Exit Sub
+    End If
+
+    Dim modo As Integer
+    modo = MsgBox("Escolha o modo de sincronização:" & vbCrLf & vbCrLf & _
+                  "[Sim] → Principal → Submontagens" & vbCrLf & _
+                  "[Não] → Bidirecional (ida e volta)" & vbCrLf & _
+                  "[Cancelar] → Cancelar operação", _
+                  vbYesNoCancel + vbQuestion, "Modo de sincronização")
+
+    If modo = vbCancel Then Exit Sub
+
+    Dim alinharOrdem As Integer
+    alinharOrdem = MsgBox("Deseja alinhar os ItemNumbers dos filhos das submontagens" & vbCrLf & _
+                          "com a ordem da montagem principal?", _
+                          vbYesNo + vbQuestion, "Alinhar ordem dos filhos?")
+
+    Dim trans As Transaction = ThisApplication.TransactionManager.StartTransaction(oDoc, "Sincronizar e alinhar ItemNumbers")
+
+    ' === 1. Sincronização: sub → principal (caso bidirecional)
+    If modo = vbNo Then
+        Dim itemMap As New Dictionary(Of String, String)
+        ProcessSubAssembly(oDoc, itemMap)
+        ApplyItemNumbersToMain(oDoc, itemMap)
+    End If
+
+    ' === 2. Sincronização: principal → submontagens (sempre)
+    PushItemNumbersToSubAssemblies(oDoc)
+
+    ' === 3. Alinhar ordem dos filhos com base na montagem principal
+    If alinharOrdem = vbYes Then
+        Dim bomPrincipal As BOM = oDoc.ComponentDefinition.BOM
+        bomPrincipal.StructuredViewEnabled = True
+        bomPrincipal.StructuredViewFirstLevelOnly = False
+
+        Dim viewPrincipal As BOMView = GetStructuredBOMView(bomPrincipal)
+        If viewPrincipal IsNot Nothing Then
+            Dim ordemMap As Dictionary(Of String, Integer) = BuildOrderMap(viewPrincipal)
+            For Each row As BOMRow In viewPrincipal.BOMRows
+                If row.ChildRows IsNot Nothing Then
+                    ApplyItemNumberOrderToSubAssembly(row, ordemMap)
+                End If
+            Next
+        End If
+    End If
+
+    trans.End()
+    MsgBox("Processo concluído com sucesso.")
+End Sub
+
+' === Coleta ItemNumbers das submontagens ===
+Sub ProcessSubAssembly(doc As AssemblyDocument, ByRef itemMap As Dictionary(Of String, String))
+    Dim bom As BOM = doc.ComponentDefinition.BOM
+    bom.StructuredViewEnabled = True
+    bom.StructuredViewFirstLevelOnly = False
+
+    Dim view As BOMView = GetStructuredBOMView(bom)
+    If view Is Nothing Then Exit Sub
+
+    For Each row As BOMRow In view.BOMRows
+        Dim key As String = GetRowKey(row)
+        If Not itemMap.ContainsKey(key) Then
+            Dim itemNum As String = row.ItemNumber
+            If Not String.IsNullOrEmpty(itemNum) Then
+                itemMap.Add(key, itemNum)
+            End If
+        End If
+
+        If row.ChildRows IsNot Nothing Then
+            Dim subDoc As AssemblyDocument = TryGetSubAssemblyDoc(row)
+            If subDoc IsNot Nothing Then
+                ProcessSubAssembly(subDoc, itemMap)
+            End If
+        End If
+    Next
+End Sub
+
+' === Aplica ItemNumbers na montagem principal ===
+Sub ApplyItemNumbersToMain(doc As AssemblyDocument, itemMap As Dictionary(Of String, String))
+    Dim bom As BOM = doc.ComponentDefinition.BOM
+    bom.StructuredViewEnabled = True
+    bom.StructuredViewFirstLevelOnly = False
+
+    Dim view As BOMView = GetStructuredBOMView(bom)
+    If view Is Nothing Then Exit Sub
+
+    For Each row As BOMRow In view.BOMRows
+        ApplyItemNumber(row, itemMap)
+    Next
+End Sub
+
+Sub ApplyItemNumber(row As BOMRow, itemMap As Dictionary(Of String, String))
+    Try
+        Dim key As String = GetRowKey(row)
+        If itemMap.ContainsKey(key) Then
+            row.ItemNumber = itemMap(key)
+        End If
+    Catch
+    End Try
+
+    If row.ChildRows IsNot Nothing Then
+        For Each child As BOMRow In row.ChildRows
+            ApplyItemNumber(child, itemMap)
+        Next
+    End If
+End Sub
+
+' === Atualiza ItemNumbers nas submontagens com base na montagem principal ===
+Sub PushItemNumbersToSubAssemblies(oDoc As AssemblyDocument)
+    Dim oBOM As BOM = oDoc.ComponentDefinition.BOM
+    oBOM.StructuredViewEnabled = True
+    oBOM.StructuredViewFirstLevelOnly = False
+
+    Dim oView As BOMView = GetStructuredBOMView(oBOM)
+    If oView Is Nothing Then Exit Sub
+
+    For Each parentRow As BOMRow In oView.BOMRows
+        If parentRow.ChildRows Is Nothing Then Continue For
+
+        Dim subDoc As AssemblyDocument = TryGetSubAssemblyDoc(parentRow)
+        If subDoc Is Nothing Then Continue For
+
+        Dim subBOM As BOM = subDoc.ComponentDefinition.BOM
+        subBOM.StructuredViewEnabled = True
+        subBOM.StructuredViewFirstLevelOnly = False
+
+        Dim subView As BOMView = GetStructuredBOMView(subBOM)
+        If subView Is Nothing Then Continue For
+
+        For Each subRow As BOMRow In subView.BOMRows
+            Dim subKey As String = GetRowKey(subRow)
+            For Each childRow As BOMRow In parentRow.ChildRows
+                If GetRowKey(childRow) = subKey Then
+                    Dim fullItem As String = childRow.ItemNumber
+                    Dim parts() As String = Split(fullItem, ".")
+                    If parts.Length > 1 AndAlso IsNumeric(parts(1)) Then
+                        Try
+                            subRow.ItemNumber = parts(1)
+                        Catch
+                        End Try
+                    End If
+                    Exit For
+                End If
+            Next
+        Next
+    Next
+End Sub
+
+' === Alinha os filhos da submontagem com a ordem da montagem principal ===
+Sub ApplyItemNumberOrderToSubAssembly(parentRow As BOMRow, ordemMap As Dictionary(Of String, Integer))
+    Dim subDoc As AssemblyDocument = TryGetSubAssemblyDoc(parentRow)
+    If subDoc Is Nothing Then Exit Sub
+
+    Dim bom As BOM = subDoc.ComponentDefinition.BOM
+    bom.StructuredViewEnabled = True
+    bom.StructuredViewFirstLevelOnly = False
+
+    Dim view As BOMView = GetStructuredBOMView(bom)
+    If view Is Nothing Then Exit Sub
+
+    Dim rows As New List(Of BOMRow)
+    For Each r As BOMRow In view.BOMRows
+        rows.Add(r)
+    Next
+
+    rows.Sort(Function(a, b)
+                  Dim keyA As String = GetRowKey(a)
+                  Dim keyB As String = GetRowKey(b)
+                  Dim posA As Integer = If(ordemMap.ContainsKey(keyA), ordemMap(keyA), Integer.MaxValue)
+                  Dim posB As Integer = If(ordemMap.ContainsKey(keyB), ordemMap(keyB), Integer.MaxValue)
+                  Return posA.CompareTo(posB)
+              End Function)
+
+    Dim idx As Integer = 1
+    For Each r As BOMRow In rows
+        Try
+            r.ItemNumber = idx.ToString
+        Catch
+        End Try
+        idx += 1
+    Next
+
+    Try
+        If subDoc.Dirty Then subDoc.Save()
+    Catch
+    End Try
+End Sub
+
+' === Utilitários ===
+
+Function TryGetSubAssemblyDoc(row As BOMRow) As AssemblyDocument
+    Try
+        If row.ComponentDefinitions.Count = 0 Then Return Nothing
+        Dim path As String = row.ComponentDefinitions(1).Document.FullFileName
+        If String.IsNullOrEmpty(path) Then Return Nothing
+        Dim doc As Document
+        Try
+            doc = ThisApplication.Documents.Item(path)
+        Catch
+            doc = ThisApplication.Documents.Open(path, True)
+        End Try
+        Return TryCast(doc, AssemblyDocument)
+    Catch
+        Return Nothing
+    End Try
+End Function
+
+Function GetStructuredBOMView(bom As BOM) As BOMView
+    For Each view As BOMView In bom.BOMViews
+        If view.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+            Return view
+        End If
+    Next
+    Return Nothing
+End Function
+
+Function GetRowKey(row As BOMRow) As String
+    Try
+        Dim def = row.ComponentDefinitions(1)
+        If TypeOf def Is VirtualComponentDefinition Then
+            Return "virtual:" & def.PropertySets("Design Tracking Properties").Item("Part Number").Value.ToLower
+        Else
+            Return def.Document.FullFileName.ToLower
+        End If
+    Catch
+        Return ""
+    End Try
+End Function
+
+Function BuildOrderMap(view As BOMView) As Dictionary(Of String, Integer)
+    Dim map As New Dictionary(Of String, Integer)
+    Dim idx As Integer = 1
+    For Each row As BOMRow In view.BOMRows
+        Dim key As String = GetRowKey(row)
+        If Not map.ContainsKey(key) Then map.Add(key, idx)
+        idx += 1
+    Next
+    Return map
+End Function
