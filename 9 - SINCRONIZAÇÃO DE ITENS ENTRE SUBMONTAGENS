@@ -1,0 +1,93 @@
+Sub Main()
+    Dim oDoc As AssemblyDocument = TryCast(ThisApplication.ActiveDocument, AssemblyDocument)
+    If oDoc Is Nothing Then
+        MsgBox("Abra uma montagem antes de executar.")
+        Exit Sub
+    End If
+
+    ' Ativar BOM estruturada
+    Dim oBOM As BOM = oDoc.ComponentDefinition.BOM
+    oBOM.StructuredViewEnabled = True
+    oBOM.StructuredViewFirstLevelOnly = False
+
+    Dim oStructView As BOMView = Nothing
+    For Each view As BOMView In oBOM.BOMViews
+        If view.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+            oStructView = view
+            Exit For
+        End If
+    Next
+    If oStructView Is Nothing Then
+        MsgBox("BOM estruturada não encontrada.")
+        Exit Sub
+    End If
+
+    ' Processar cada submontagem
+    For Each parentRow As BOMRow In oStructView.BOMRows
+        If parentRow.ChildRows Is Nothing Then Continue For
+
+        Dim subDoc As AssemblyDocument = TryGetSubAssemblyDoc(parentRow)
+        If subDoc Is Nothing Then Continue For
+
+        ' Ativar BOM estruturada da submontagem
+        Dim subBOM As BOM = subDoc.ComponentDefinition.BOM
+        subBOM.StructuredViewEnabled = True
+        subBOM.StructuredViewFirstLevelOnly = False
+
+        Dim subView As BOMView = Nothing
+        For Each view As BOMView In subBOM.BOMViews
+            If view.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+                subView = view
+                Exit For
+            End If
+        Next
+        If subView Is Nothing Then Continue For
+
+        ' Renomear filhos da submontagem
+        For Each subRow As BOMRow In subView.BOMRows
+            Dim subKey As String = GetRowKey(subRow)
+
+            For Each childRow As BOMRow In parentRow.ChildRows
+                If GetRowKey(childRow) = subKey Then
+                    Dim fullItemNumber As String = childRow.ItemNumber
+                    Dim parts() As String = Split(fullItemNumber, ".")
+                    If parts.Length > 1 AndAlso IsNumeric(parts(1)) Then
+                        Try
+                            subRow.ItemNumber = parts(1)
+                        Catch
+                            ' ignora erros de edição
+                        End Try
+                    End If
+                    Exit For
+                End If
+            Next
+        Next
+    Next
+
+    MsgBox("ItemNumbers atualizados nas submontagens.")
+End Sub
+
+Function TryGetSubAssemblyDoc(row As BOMRow) As AssemblyDocument
+    Try
+        If row.ComponentDefinitions.Count = 0 Then Return Nothing
+        Dim path As String = row.ComponentDefinitions(1).Document.FullFileName
+        If String.IsNullOrEmpty(path) Then Return Nothing
+        Dim doc As Document
+        Try
+            doc = ThisApplication.Documents.Item(path)
+        Catch
+            doc = ThisApplication.Documents.Open(path, True)
+        End Try
+        Return TryCast(doc, AssemblyDocument)
+    Catch
+        Return Nothing
+    End Try
+End Function
+
+Function GetRowKey(row As BOMRow) As String
+    Try
+        Return row.ComponentDefinitions(1).Document.FullFileName.ToLower
+    Catch
+        Return ""
+    End Try
+End Function
