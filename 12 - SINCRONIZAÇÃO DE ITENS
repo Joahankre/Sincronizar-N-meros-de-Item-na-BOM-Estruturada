@@ -1,0 +1,124 @@
+' iLogic - Alinhar ItemNumber dos filhos das submontagens com base na montagem principal
+
+Sub Main()
+    Dim oDoc As AssemblyDocument = TryCast(ThisApplication.ActiveDocument, AssemblyDocument)
+    If oDoc Is Nothing Then
+        MsgBox("Abra uma montagem antes de executar.")
+        Exit Sub
+    End If
+
+    ' Ativa a Structured BOM do assembly pai
+    Dim oBOM As BOM = oDoc.ComponentDefinition.BOM
+    oBOM.StructuredViewEnabled = True
+    oBOM.StructuredViewFirstLevelOnly = False
+
+    Dim oStructView As BOMView = GetStructuredBOMView(oBOM)
+    If oStructView Is Nothing Then
+        MsgBox("Structured BOM não encontrada.")
+        Exit Sub
+    End If
+
+    ' Cria mapa com a ordem de cada item (documento) na montagem principal
+    Dim orderMap As Dictionary(Of String, Integer) = BuildOrderMap(oStructView)
+
+    ' Para cada submontagem na montagem principal, aplicar ordem aos filhos
+    For Each oRow As BOMRow In oStructView.BOMRows
+        If oRow.ChildRows IsNot Nothing Then
+            ApplyItemNumberOrderToSubAssembly(oRow, orderMap)
+        End If
+    Next
+
+    MsgBox("ItemNumbers das submontagens alinhados com a montagem principal.")
+End Sub
+
+' Retorna a Structured BOM view
+Function GetStructuredBOMView(ByVal oBOM As BOM) As BOMView
+    For Each view As BOMView In oBOM.BOMViews
+        If View.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+            Return View
+        End If
+    Next
+    Return Nothing
+End Function
+
+' Cria mapa com ordem da montagem principal (documento completo como chave)
+Function BuildOrderMap(ByVal oView As BOMView) As Dictionary(Of String, Integer)
+    Dim map As New Dictionary(Of String, Integer)
+    Dim idx As Integer = 1
+    For Each row As BOMRow In oView.BOMRows
+        Dim key As String = GetRowKey(Row)
+        If Not map.ContainsKey(key) Then map.Add(key, idx)
+        idx += 1
+    Next
+    Return map
+End Function
+
+' Alinha os ItemNumbers dos filhos de uma submontagem com base na ordem do pai
+Sub ApplyItemNumberOrderToSubAssembly(ByVal parentRow As BOMRow, ByVal parentMap As Dictionary(Of String, Integer))
+    Dim subDocPath As String
+    Try
+        subDocPath = parentRow.ComponentDefinitions(1).Document.FullFileName
+    Catch
+        Exit Sub
+    End Try
+
+    If String.IsNullOrEmpty(subDocPath) Then Exit Sub
+
+    ' Abrir a submontagem como documento real
+    Dim subDoc As AssemblyDocument = Nothing
+    Try
+        subDoc = TryCast(ThisApplication.Documents.Open(subDocPath, True), AssemblyDocument)
+    Catch
+        Exit Sub
+    End Try
+
+    If subDoc Is Nothing Then Exit Sub
+
+    ' Ativa a BOM da submontagem
+    Dim oSubBOM As BOM = subDoc.ComponentDefinition.BOM
+    oSubBOM.StructuredViewEnabled = True
+    oSubBOM.StructuredViewFirstLevelOnly = False
+
+    Dim oSubView As BOMView = GetStructuredBOMView(oSubBOM)
+    If oSubView Is Nothing Then Exit Sub
+
+    ' Reordena os filhos da submontagem conforme mapa do pai
+    Dim childList As New List(Of BOMRow)
+    For Each c As BOMRow In oSubView.BOMRows
+        childList.Add(c)
+    Next
+
+    childList.Sort(Function(a, b)
+                       Dim keyA As String = GetRowKey(a)
+                       Dim keyB As String = GetRowKey(b)
+                       Dim posA As Integer = If(parentMap.ContainsKey(keyA), parentMap(keyA), Integer.MaxValue)
+                       Dim posB As Integer = If(parentMap.ContainsKey(keyB), parentMap(keyB), Integer.MaxValue)
+                       Return posA.CompareTo(posB)
+                   End Function)
+
+    ' Atualiza os ItemNumbers da submontagem
+    Dim idx As Integer = 1
+    For Each c As BOMRow In childList
+        Try
+            c.ItemNumber = idx.ToString
+        Catch
+            ' Em caso de erro (read-only), ignora
+        End Try
+        idx += 1
+    Next
+
+    ' Salva a submontagem
+    Try
+        subDoc.Save
+    Catch
+    End Try
+End Sub
+
+' Cria chave única de identificação por documento
+Function GetRowKey(ByVal row As BOMRow) As String
+    Try
+        Return row.ComponentDefinitions(1).Document.FullFileName.ToLower
+    Catch
+        Return Guid.NewGuid.ToString
+    End Try
+End Function
