@@ -1,0 +1,191 @@
+Sub Main()
+    Dim oDoc As AssemblyDocument = TryCast(ThisApplication.ActiveDocument, AssemblyDocument)
+    If oDoc Is Nothing Then
+        MsgBox("Abra uma montagem antes de executar.")
+        Exit Sub
+    End If
+
+    Dim opcao As Integer
+    opcao = MsgBox("Escolha a opção de sincronização:" & vbCrLf & vbCrLf & _
+                   "Sim = Apenas principal → submontagens" & vbCrLf & _
+                   "Não = Sincronização completa (ida e volta)" & vbCrLf & _
+                   "Cancelar = Cancelar operação", _
+                   vbYesNoCancel + vbQuestion, "Sincronizar ItemNumbers")
+
+    If opcao = vbCancel Then Exit Sub
+
+    ' Inicia transação para agrupamento das alterações
+    Dim trans As Transaction = ThisApplication.TransactionManager.StartTransaction(oDoc, "Sincronizar ItemNumbers")
+
+    If opcao = vbNo Then
+        ' Etapa 1: Sincronizar das submontagens → para a principal
+        Dim itemMap As New Dictionary(Of String, String)
+        ProcessSubAssembly(oDoc, itemMap)
+        ApplyItemNumbersToMain(oDoc, itemMap)
+    End If
+
+    ' Etapa 2: Sempre sincroniza da principal → para as submontagens
+    PushItemNumbersToSubAssemblies(oDoc)
+
+    trans.End()
+    MsgBox("Sincronização de ItemNumbers concluída com sucesso.")
+End Sub
+
+' === FUNÇÃO: Coleta ItemNumbers das submontagens ===
+Sub ProcessSubAssembly(doc As AssemblyDocument, ByRef itemMap As Dictionary(Of String, String))
+    Dim bom As BOM = doc.ComponentDefinition.BOM
+    bom.StructuredViewEnabled = True
+    bom.StructuredViewFirstLevelOnly = False
+
+    Dim view As BOMView = Nothing
+    Try
+        view = bom.BOMViews("Structured")
+    Catch
+        Exit Sub
+    End Try
+    If view Is Nothing Then Exit Sub
+
+    For Each row As BOMRow In view.BOMRows
+        Dim key As String = GetRowKey(Row)
+        If Not itemMap.ContainsKey(key) Then
+            Dim itemNum As String = Row.ItemNumber
+            If Not String.IsNullOrEmpty(itemNum) Then
+                itemMap.Add(key, itemNum)
+            End If
+        End If
+
+        If Row.ChildRows IsNot Nothing AndAlso Row.ComponentDefinitions.Count > 0 Then
+            Dim subDoc As AssemblyDocument = TryGetSubAssemblyDoc(Row)
+            If subDoc IsNot Nothing Then
+                ProcessSubAssembly(subDoc, itemMap)
+            End If
+        End If
+    Next
+End Sub
+
+' === FUNÇÃO: Aplica ItemNumbers na montagem principal ===
+Sub ApplyItemNumbersToMain(doc As AssemblyDocument, itemMap As Dictionary(Of String, String))
+    Dim bom As BOM = doc.ComponentDefinition.BOM
+    bom.StructuredViewEnabled = True
+    bom.StructuredViewFirstLevelOnly = False
+
+    Dim view As BOMView = Nothing
+    Try
+        view = bom.BOMViews("Structured")
+    Catch
+        Exit Sub
+    End Try
+    If view Is Nothing Then Exit Sub
+
+    For Each row As BOMRow In view.BOMRows
+        ApplyItemNumber(Row, itemMap)
+    Next
+
+    view.Sort("Item")
+End Sub
+
+Sub ApplyItemNumber(row As BOMRow, itemMap As Dictionary(Of String, String))
+    Try
+        Dim key As String = GetRowKey(row)
+        If itemMap.ContainsKey(key) Then
+            row.ItemNumber = itemMap(key)
+        End If
+    Catch
+        ' Ignora erro
+    End Try
+
+    If row.ChildRows IsNot Nothing Then
+        For Each child As BOMRow In row.ChildRows
+            ApplyItemNumber(child, itemMap)
+        Next
+    End If
+End Sub
+
+' === FUNÇÃO: Atualiza os ItemNumbers nas submontagens com base na montagem principal ===
+Sub PushItemNumbersToSubAssemblies(oDoc As AssemblyDocument)
+    Dim oBOM As BOM = oDoc.ComponentDefinition.BOM
+    oBOM.StructuredViewEnabled = True
+    oBOM.StructuredViewFirstLevelOnly = False
+
+    Dim oStructView As BOMView = Nothing
+    For Each view As BOMView In oBOM.BOMViews
+        If View.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+            oStructView = View
+            Exit For
+        End If
+    Next
+    If oStructView Is Nothing Then Exit Sub
+
+    For Each parentRow As BOMRow In oStructView.BOMRows
+        If parentRow.ChildRows Is Nothing Then Continue For
+
+        Dim subDoc As AssemblyDocument = TryGetSubAssemblyDoc(parentRow)
+        If subDoc Is Nothing Then Continue For
+
+        ' Ativa BOM da submontagem
+        Dim subBOM As BOM = subDoc.ComponentDefinition.BOM
+        subBOM.StructuredViewEnabled = True
+        subBOM.StructuredViewFirstLevelOnly = False
+
+        Dim subView As BOMView = Nothing
+        For Each view As BOMView In subBOM.BOMViews
+            If View.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+                subView = View
+                Exit For
+            End If
+        Next
+        If subView Is Nothing Then Continue For
+
+        ' Renomeia os filhos
+        For Each subRow As BOMRow In subView.BOMRows
+            Dim subKey As String = GetRowKey(subRow)
+
+            For Each childRow As BOMRow In parentRow.ChildRows
+                If GetRowKey(childRow) = subKey Then
+                    Dim fullItemNumber As String = childRow.ItemNumber
+                    Dim parts() As String = Split(fullItemNumber, ".")
+                    If parts.Length > 1 AndAlso IsNumeric(parts(1)) Then
+                        Try
+                            subRow.ItemNumber = parts(1)
+                        Catch
+                            ' ignora
+                        End Try
+                    End If
+                    Exit For
+                End If
+            Next
+        Next
+    Next
+End Sub
+
+' === UTILITÁRIOS ===
+
+Function TryGetSubAssemblyDoc(row As BOMRow) As AssemblyDocument
+    Try
+        If row.ComponentDefinitions.Count = 0 Then Return Nothing
+        Dim path As String = row.ComponentDefinitions(1).Document.FullFileName
+        If String.IsNullOrEmpty(path) Then Return Nothing
+        Dim doc As Document
+        Try
+            doc = ThisApplication.Documents.Item(path)
+        Catch
+            doc = ThisApplication.Documents.Open(path, True)
+        End Try
+        Return TryCast(doc, AssemblyDocument)
+    Catch
+        Return Nothing
+    End Try
+End Function
+
+Function GetRowKey(row As BOMRow) As String
+    Try
+        Dim def = row.ComponentDefinitions(1)
+        If TypeOf def Is VirtualComponentDefinition Then
+            Return "virtual:" & def.PropertySets("Design Tracking Properties").Item("Part Number").Value.ToLower
+        Else
+            Return def.Document.FullFileName.ToLower
+        End If
+    Catch
+        Return ""
+    End Try
+End Function
