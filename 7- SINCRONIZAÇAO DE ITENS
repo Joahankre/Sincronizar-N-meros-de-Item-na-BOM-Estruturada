@@ -1,6 +1,5 @@
 ' ================================================
 ' Regra iLogic: Transferir ordem visual do pai para submontagens (reordenação)
-' Autor: ChatGPT
 ' Objetivo: 
 '   Aplicar a ordem visual manual da montagem pai dentro de todas as submontagens,
 '   de modo que cada submontagem tenha sua própria BOM reordenada de acordo.
