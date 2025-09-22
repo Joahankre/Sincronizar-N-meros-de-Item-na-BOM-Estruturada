@@ -1,0 +1,100 @@
+Sub Main()
+    Dim oDoc As AssemblyDocument = TryCast(ThisApplication.ActiveDocument, AssemblyDocument)
+    If oDoc Is Nothing Then
+        MsgBox("Abra uma montagem antes de executar.")
+        Exit Sub
+    End If
+
+    Dim counter As Integer = 1
+    AssignItemNumbers(oDoc, "", counter)
+
+    Try
+        oDoc.Save()
+    Catch
+        MsgBox("Falha ao salvar a montagem principal.")
+    End Try
+
+    MsgBox("ItemNumbers hierárquicos aplicados com sucesso.")
+End Sub
+
+' === Função recursiva que percorre todas as submontagens e aplica ItemNumber hierárquico ===
+Sub AssignItemNumbers(doc As AssemblyDocument, prefix As String, ByRef index As Integer)
+    Dim bom As BOM = doc.ComponentDefinition.BOM
+    bom.StructuredViewEnabled = True
+    bom.StructuredViewFirstLevelOnly = False
+
+    Dim view As BOMView = Nothing
+    For Each v As BOMView In bom.BOMViews
+        If v.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+            view = v
+            Exit For
+        End If
+    Next
+    If view Is Nothing Then Exit Sub
+
+    Dim localIndex As Integer = 1
+    For Each row As BOMRow In view.BOMRows
+        Dim fullNumber As String
+        If prefix = "" Then
+            fullNumber = localIndex.ToString
+        Else
+            fullNumber = prefix & "." & localIndex.ToString
+        End If
+
+        Try
+            Row.ItemNumber = fullNumber
+        Catch
+            ' Se não for possível atribuir, continua
+        End Try
+
+        ' Verifica se é submontagem e processa recursivamente
+        If Row.ChildRows IsNot Nothing AndAlso Row.ComponentDefinitions.Count > 0 Then
+            Dim subDoc As AssemblyDocument = TryGetSubAssemblyDoc(Row)
+            If subDoc IsNot Nothing Then
+                AssignItemNumbers(subDoc, fullNumber, index)
+
+                ' Salva e fecha imediatamente
+                Try
+                    If subDoc.IsDirty Then subDoc.Save()
+                    subDoc.Close(True) ' True = skip save prompt
+                Catch
+                    ' Ignora falha ao salvar ou fechar
+                End Try
+            End If
+        End If
+
+        localIndex += 1
+    Next
+End Sub
+
+' === Função para abrir ou obter documento da submontagem ===
+Function TryGetSubAssemblyDoc(row As BOMRow) As AssemblyDocument
+    Try
+        If row.ComponentDefinitions.Count = 0 Then Return Nothing
+        Dim path As String = row.ComponentDefinitions(1).Document.FullFileName
+        If String.IsNullOrEmpty(path) Then Return Nothing
+
+        Dim doc As Document = Nothing
+        Dim wasAlreadyOpen As Boolean = False
+
+        ' Verifica se o documento já está aberto
+        For Each d As Document In ThisApplication.Documents
+            If String.Compare(d.FullFileName, path, True) = 0 Then
+                doc = d
+                wasAlreadyOpen = True
+                Exit For
+            End If
+        Next
+
+        ' Se não estava aberto, abre agora (modo invisível)
+        If doc Is Nothing Then
+            doc = ThisApplication.Documents.Open(path, True)
+        End If
+
+        ' Só processamos se não for o documento principal ou outro tipo
+        Return TryCast(doc, AssemblyDocument)
+
+    Catch
+        Return Nothing
+    End Try
+End Function
