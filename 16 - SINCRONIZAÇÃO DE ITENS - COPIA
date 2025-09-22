@@ -1,0 +1,78 @@
+Sub Main()
+    If ThisApplication.ActiveDocument Is Nothing OrElse _
+       ThisApplication.ActiveDocument.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+        MessageBox.Show("Abra um documento de montagem com BOM estruturado habilitado (All Levels).", "Erro")
+        Return
+    End If
+
+    Dim oDoc As AssemblyDocument = ThisApplication.ActiveDocument
+    Dim oBOM As BOM = oDoc.ComponentDefinition.BOM
+
+    If Not oBOM.StructuredViewEnabled Or oBOM.StructuredViewFirstLevelOnly Then
+        MessageBox.Show("A BOM estruturada deve estar habilitada para todos os níveis.", "Erro")
+        Return
+    End If
+
+    Dim oStructView As BOMView = GetStructuredView(oBOM)
+    If oStructView Is Nothing Then
+        MessageBox.Show("Não foi possível acessar a BOM estruturada.", "Erro")
+        Return
+    End If
+
+    Dim itemIndex As Integer = 1
+    For Each oRow As BOMRow In oStructView.BOMRows
+        Dim visualItemNumber As String = CStr(itemIndex)
+        oRow.ItemNumber = visualItemNumber
+        UpdateChildRows(oRow, visualItemNumber, oBOM.StructuredViewDelimiter)
+        itemIndex += 1
+    Next
+
+    MessageBox.Show("Sincronização de item numbers concluída!", "Sucesso")
+End Sub
+
+Sub UpdateChildRows(oParentRow As BOMRow, parentItemNumber As String, delimiter As String)
+    If oParentRow.ChildRows Is Nothing Then Exit Sub
+
+    Dim childIndex As Integer = 1
+    For Each oChildRow As BOMRow In oParentRow.ChildRows
+        Dim visualItemNumber As String = parentItemNumber & delimiter & CStr(childIndex)
+        oChildRow.ItemNumber = visualItemNumber
+
+        ' === Atualizar submontagens ===
+        Dim oRefDoc As Document = oChildRow.ComponentDefinitions(1).Document
+        If oRefDoc.DocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+            Dim subAsm As AssemblyDocument = CType(oRefDoc, AssemblyDocument)
+            Dim subBOM As BOM = subAsm.ComponentDefinition.BOM
+
+            ' Habilita BOM estruturada se necessário
+            If Not subBOM.StructuredViewEnabled Then subBOM.StructuredViewEnabled = True
+            subBOM.StructuredViewFirstLevelOnly = False
+
+            Dim subView As BOMView = GetStructuredView(subBOM)
+            If subView IsNot Nothing Then
+                ' Mapear os componentes dentro da submontagem com os mesmos item numbers
+                Dim subIndex As Integer = 1
+                For Each subRow As BOMRow In subView.BOMRows
+                    Dim subItemNumber As String = visualItemNumber & delimiter & CStr(subIndex)
+                    subRow.ItemNumber = subItemNumber
+                    UpdateChildRows(subRow, subItemNumber, delimiter)
+                    subIndex += 1
+                Next
+
+                ' Salvar as alterações na submontagem
+                subAsm.Save()
+            End If
+        End If
+
+        childIndex += 1
+    Next
+End Sub
+
+Function GetStructuredView(oBOM As BOM) As BOMView
+    For Each view As BOMView In oBOM.BOMViews
+        If view.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+            Return view
+        End If
+    Next
+    Return Nothing
+End Function
