@@ -1,0 +1,111 @@
+Sub Main()
+    Dim oDoc As AssemblyDocument = TryCast(ThisApplication.ActiveDocument, AssemblyDocument)
+    If oDoc Is Nothing Then
+        MsgBox("Abra uma montagem antes de executar.")
+        Exit Sub
+    End If
+
+    Dim counter As Integer = 1
+    AssignItemNumbers(oDoc, "", counter)
+
+    Try
+        oDoc.Save()
+    Catch
+        MsgBox("Falha ao salvar a montagem principal.")
+    End Try
+
+    MsgBox("ItemNumbers hierárquicos aplicados com sucesso.")
+End Sub
+
+' === Função recursiva que percorre todas as submontagens e aplica ItemNumber hierárquico ===
+Sub AssignItemNumbers(doc As AssemblyDocument, prefix As String, ByRef index As Integer)
+    Dim bom As BOM = doc.ComponentDefinition.BOM
+    bom.StructuredViewEnabled = True
+    bom.StructuredViewFirstLevelOnly = False
+
+    Dim view As BOMView = Nothing
+    For Each v As BOMView In bom.BOMViews
+        If v.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+            view = v
+            Exit For
+        End If
+    Next
+    If view Is Nothing Then Exit Sub
+
+    Dim localIndex As Integer = 1
+    For Each row As BOMRow In view.BOMRows
+        Dim fullNumber As String
+        If prefix = "" Then
+            fullNumber = localIndex.ToString
+        Else
+            fullNumber = prefix & "." & localIndex.ToString
+        End If
+
+        ' Aplica o número de item
+        Try
+            Row.ItemNumber = fullNumber
+        Catch
+            ' Se não for possível atribuir, continua
+        End Try
+
+        ' Salva como iProperty personalizada no componente
+        Try
+            Dim refDoc As Document = Row.ComponentDefinitions(1).Document
+            SaveItemNumberAsProperty (refDoc, fullNumber)
+        Catch
+            ' Ignora erro ao acessar ou salvar propriedade
+        End Try
+
+        ' Verifica se é submontagem e processa recursivamente
+        If Row.ChildRows IsNot Nothing AndAlso Row.ComponentDefinitions.Count > 0 Then
+            Dim subDoc As AssemblyDocument = TryGetSubAssemblyDoc(Row)
+            If subDoc IsNot Nothing Then
+                AssignItemNumbers(subDoc, fullNumber, index)
+                Try
+                    subDoc.Save()
+                Catch
+                    ' Ignora falha ao salvar submontagem
+                End Try
+            End If
+        End If
+
+        localIndex += 1
+    Next
+End Sub
+
+' === Função para abrir ou obter documento da submontagem ===
+Function TryGetSubAssemblyDoc(row As BOMRow) As AssemblyDocument
+    Try
+        If row.ComponentDefinitions.Count = 0 Then Return Nothing
+        Dim path As String = row.ComponentDefinitions(1).Document.FullFileName
+        If String.IsNullOrEmpty(path) Then Return Nothing
+
+        Dim doc As Document
+        Try
+            doc = ThisApplication.Documents.Item(path)
+        Catch
+            doc = ThisApplication.Documents.Open(path, False) ' Abre com permissão de gravação
+        End Try
+
+        Return TryCast(doc, AssemblyDocument)
+    Catch
+        Return Nothing
+    End Try
+End Function
+
+' === Grava o número de item como uma propriedade personalizada ===
+Sub SaveItemNumberAsProperty(doc As Document, itemNumber As String)
+    On Error Resume Next
+    Dim props As PropertySet = doc.PropertySets.Item("Inventor User Defined Properties")
+    Dim prop As [Property]
+
+    prop = props.Item("ItemNumberFromParent")
+
+    If prop Is Nothing Then
+        props.Add (itemNumber, "ItemNumberFromParent")
+    Else
+        prop.Value = itemNumber
+    End If
+
+    doc.Save
+End Sub
