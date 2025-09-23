@@ -1,0 +1,100 @@
+Sub Main()
+    Dim oDoc As AssemblyDocument = TryCast(ThisApplication.ActiveDocument, AssemblyDocument)
+    If oDoc Is Nothing Then
+        MsgBox("Abra uma montagem antes de executar.")
+        Exit Sub
+    End If
+
+    Dim counter As Integer = 1
+    AssignItemNumbersAndPushToProperties(oDoc, "", counter)
+
+    Try
+        oDoc.Save()
+    Catch
+        MsgBox("Falha ao salvar a montagem principal.")
+    End Try
+
+    MsgBox("Propriedade 'ITEM_MONTAGEM' aplicada com sucesso a todos os níveis.")
+End Sub
+
+' === Atribui ItemNumber hierárquico E propaga para propriedade personalizada ===
+Sub AssignItemNumbersAndPushToProperties(doc As AssemblyDocument, prefix As String, ByRef index As Integer)
+    Dim bom As BOM = doc.ComponentDefinition.BOM
+    bom.StructuredViewEnabled = True
+    bom.StructuredViewFirstLevelOnly = False
+
+    Dim view As BOMView = bom.BOMViews.Item("Structured")
+
+    Dim localIndex As Integer = 1
+    For Each row As BOMRow In view.BOMRows
+        Dim fullNumber As String
+        If prefix = "" Then
+            fullNumber = localIndex.ToString
+        Else
+            fullNumber = prefix & "." & localIndex.ToString
+        End If
+
+        ' Aplica o número ao ItemNumber da BOM
+        Try
+            row.ItemNumber = fullNumber
+        Catch
+            ' Continua se não conseguir alterar
+        End Try
+
+        ' Aplica o número na propriedade personalizada "ITEM_MONTAGEM"
+        Try
+            Dim compDoc As Document = row.ComponentDefinitions(1).Document
+            AddOrUpdateCustomProperty(compDoc, "ITEM_MONTAGEM", fullNumber)
+            compDoc.Save()
+        Catch
+            ' Ignora se não conseguir acessar ou salvar
+        End Try
+
+        ' Recursivamente processa submontagens
+        If row.ChildRows IsNot Nothing AndAlso row.ComponentDefinitions.Count > 0 Then
+            Dim subDoc As AssemblyDocument = TryGetSubAssemblyDoc(row)
+            If subDoc IsNot Nothing Then
+                AssignItemNumbersAndPushToProperties(subDoc, fullNumber, index)
+                Try
+                    subDoc.Save()
+                Catch
+                End Try
+            End If
+        End If
+
+        localIndex += 1
+    Next
+End Sub
+
+' === Adiciona ou atualiza a propriedade personalizada ===
+Sub AddOrUpdateCustomProperty(oDoc As Document, propName As String, propValue As String)
+    Dim oProps As PropertySet = oDoc.PropertySets.Item("Inventor User Defined Properties")
+
+    Try
+        Dim prop As Inventor.Property = oProps.Item(propName)
+        prop.Value = propValue
+    Catch
+        ' Se não existe, cria
+        oProps.Add(propValue, propName)
+    End Try
+End Sub
+
+' === Tenta obter documento da submontagem ===
+Function TryGetSubAssemblyDoc(row As BOMRow) As AssemblyDocument
+    Try
+        If row.ComponentDefinitions.Count = 0 Then Return Nothing
+        Dim path As String = row.ComponentDefinitions(1).Document.FullFileName
+        If String.IsNullOrEmpty(path) Then Return Nothing
+
+        Dim doc As Document
+        Try
+            doc = ThisApplication.Documents.Item(path)
+        Catch
+            doc = ThisApplication.Documents.Open(path, True)
+        End Try
+
+        Return TryCast(doc, AssemblyDocument)
+    Catch
+        Return Nothing
+    End Try
+End Function
