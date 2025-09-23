@@ -1,0 +1,244 @@
+Imports Inventor
+Imports System.Windows.Forms
+Imports System.Text
+Imports System.Linq
+' iLogic - Inventor: Sincroniza Item Numbers com base no BOM hierárquico (Assembly Principal + Submontagens)
+' Compatível com Inventor 2020+
+
+
+Sub Main()
+
+    Dim doc As Document = ThisApplication.ActiveDocument
+    If doc Is Nothing OrElse doc.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+        MessageBox.Show("Abra uma montagem antes de rodar esta regra.", "Documento inválido", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+        Return
+    End If
+
+    Dim asmDoc As AssemblyDocument = CType(doc, AssemblyDocument)
+    Dim mapaGlobal As List(Of Tuple(Of String, String, String)) = ObterMapaCompleto(asmDoc)
+
+    If mapaGlobal.Count = 0 Then
+        MessageBox.Show("Nenhum item encontrado no BOM estruturado da montagem.", "Aviso", MessageBoxButtons.OK, MessageBoxIcon.Information)
+        Return
+    End If
+
+    ' Sincroniza montagem principal
+    Dim mapaLocal As Dictionary(Of String, String) = ObterMapaLocal(asmDoc)
+    SincronizarItemNumbers(mapaGlobal, mapaLocal, asmDoc, asmDoc.DisplayName)
+
+    ' Sincroniza submontagens
+    SincronizarSubmontagensRecursivo(asmDoc, mapaGlobal)
+
+    ' Salva montagem principal
+    Try : asmDoc.Save2(True) : Catch : End Try
+
+    ' Exibe resultado
+    ShowFormattedResults(FormatarMapaParaTexto(mapaGlobal))
+    MessageBox.Show("Sincronização concluída com sucesso!", "Sucesso", MessageBoxButtons.OK, MessageBoxIcon.Information)
+
+End Sub
+
+' === Mostrar painel com resultado da execução ===
+Private Sub ShowFormattedResults(message As String)
+    Dim form As New Form With {.Text = "RESULTADO DA SINCRONIZAÇÃO", .Width = 1000, .Height = 600}
+    Dim richText As New RichTextBox With {.Dock = DockStyle.Fill, .ReadOnly = True}
+    richText.AppendText("MAPA DE SINCRONIZAÇÃO:" & vbCrLf & vbCrLf & message)
+    form.Controls.Add(richText)
+    form.ShowDialog()
+End Sub
+
+' === Formata a lista em texto legível ===
+Private Function FormatarMapaParaTexto(mapa As List(Of Tuple(Of String, String, String))) As String
+    Dim sb As New StringBuilder()
+
+    ' Defina larguras fixas para as colunas
+    Dim col1Width As Integer = 70 ' PART NUMBER
+    Dim col2Width As Integer = 30 ' ITEM NUMBER
+
+    ' Cabeçalho
+    sb.AppendLine("PART NUMBER".PadRight(col1Width) & "ITEM NUMBER".PadRight(col2Width) & "CAMINHO HIERÁRQUICO")
+    sb.AppendLine(New String("-"c, col1Width + col2Width + 70)) ' Ajuste o total conforme necessário
+
+    ' Conteúdo
+    For Each item In mapa
+        sb.AppendLine(item.Item1.PadRight(col1Width) & item.Item2.PadRight(col2Width) & item.Item3)
+    Next
+
+    Return sb.ToString()
+End Function
+
+
+' === Gera mapa completo a partir do BOM estruturado (com hierarquia) ===
+Private Function ObterMapaCompleto(asm As AssemblyDocument) As List(Of Tuple(Of String, String, String))
+    Dim mapa As New List(Of Tuple(Of String, String, String))()
+
+    Try
+        Dim bom As BOM = asm.ComponentDefinition.BOM
+        bom.StructuredViewEnabled = True
+        bom.StructuredViewFirstLevelOnly = False
+
+        Dim view As BOMView = bom.BOMViews _
+            .Cast(Of BOMView)() _
+            .FirstOrDefault(Function(v) v.ViewType = BOMViewTypeEnum.kStructuredBOMViewType)
+
+        If view Is Nothing Then Return mapa
+
+        For Each row As BOMRow In view.BOMRows
+            AdicionarAoMapaRecursivo(Row, mapa, asm.DisplayName)
+        Next
+
+    Catch ex As Exception
+        MessageBox.Show("Erro ao construir mapa completo: " & ex.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error)
+    End Try
+
+    Return mapa
+End Function
+
+' === Adiciona linhas ao mapa global com caminho hierárquico ===
+Private Sub AdicionarAoMapaRecursivo(row As BOMRow, mapa As List(Of Tuple(Of String, String, String)), parentPath As String)
+    Try
+        If row.ComponentDefinitions.Count = 0 Then Exit Sub
+
+        Dim doc As Document = row.ComponentDefinitions.Item(1).Document
+        Dim partNumber As String = doc.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value.ToString()
+        Dim itemNumber As String = row.ItemNumber
+        Dim caminho As String = parentPath & "\" & doc.DisplayName
+
+        If Not String.IsNullOrEmpty(partNumber) AndAlso Not String.IsNullOrEmpty(itemNumber) Then
+            mapa.Add(New Tuple(Of String, String, String)(partNumber, itemNumber, caminho))
+        End If
+
+        If row.ChildRows IsNot Nothing Then
+            For Each child In row.ChildRows
+                AdicionarAoMapaRecursivo(child, mapa, caminho)
+            Next
+        End If
+
+    Catch
+        ' Ignora erros individuais
+    End Try
+End Sub
+
+' === Extrai o mapa local da montagem (sem hierarquia) ===
+Private Function ObterMapaLocal(assemblyDoc As AssemblyDocument) As Dictionary(Of String, String)
+    Dim mapa As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+
+    Try
+        Dim bom As BOM = assemblyDoc.ComponentDefinition.BOM
+        bom.StructuredViewEnabled = True
+        bom.StructuredViewFirstLevelOnly = True
+
+        Dim view As BOMView = bom.BOMViews.Cast(Of BOMView)().
+            FirstOrDefault(Function(v) v.ViewType = BOMViewTypeEnum.kStructuredBOMViewType)
+
+        If view Is Nothing Then Return mapa
+
+        For Each row As BOMRow In view.BOMRows
+            Try
+                If Row.ComponentDefinitions.Count = 0 Then Continue For
+
+                Dim doc As Document = Row.ComponentDefinitions.Item(1).Document
+                Dim partNumber As String = doc.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value.ToString()
+                Dim itemNumber As String = Row.ItemNumber
+
+                If Not mapa.ContainsKey(partNumber) AndAlso Not String.IsNullOrEmpty(itemNumber) Then
+                    mapa.Add(partNumber, itemNumber)
+                End If
+
+            Catch
+                ' Ignora erros em linhas individuais
+                Continue For
+            End Try
+        Next
+
+    Catch ex As Exception
+        Debug.Print("⚠️ Erro ao construir mapa local: " & ex.Message)
+        ' Retorna dicionário vazio e continua
+        Return New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+    End Try
+
+    Return mapa
+End Function
+
+
+' === Sincroniza Item Numbers de uma montagem com base no mapa global ===
+Private Sub SincronizarItemNumbers(mapaGlobal As List(Of Tuple(Of String, String, String)), mapaLocal As Dictionary(Of String, String), asm As AssemblyDocument, subPath As String)
+    Try
+        Dim bom As BOM = asm.ComponentDefinition.BOM
+        bom.StructuredViewEnabled = True
+        bom.StructuredViewFirstLevelOnly = True
+
+        Dim view As BOMView = bom.BOMViews _
+            .Cast(Of BOMView)() _
+            .FirstOrDefault(Function(v) v.ViewType = BOMViewTypeEnum.kStructuredBOMViewType)
+
+        If view Is Nothing Then Return
+
+        ' Filtra o mapa para o contexto da submontagem
+        Dim mapaFiltrado = mapaGlobal.Where(Function(t) t.Item3.Contains("\" & subPath)).ToList()
+
+        For Each row As BOMRow In view.BOMRows
+            Try
+                If Row.ComponentDefinitions.Count = 0 Then Continue For
+
+                Dim doc As Document = Row.ComponentDefinitions.Item(1).Document
+                Dim partNumber As String = doc.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value.ToString()
+
+                Dim itemNumberPai As String = mapaFiltrado _
+                    .Where(Function(t) t.Item1 = partNumber) _
+                    .Select(Function(t) t.Item2) _
+                    .FirstOrDefault()
+
+                If Not String.IsNullOrWhiteSpace(itemNumberPai) AndAlso Row.ItemNumber <> itemNumberPai Then
+                    Try
+                        Row.ItemNumber = itemNumberPai
+                    Catch
+                        'Debug.Print ("⚠️ Falha ao atualizar ItemNumber de '" & partNumber & "'")
+                    End Try
+                End If
+
+            Catch
+                ' Ignora erro na linha
+            End Try
+        Next
+
+    Catch ex As Exception
+        'MessageBox.Show("Erro ao sincronizar item numbers: " & ex.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error)
+    End Try
+End Sub
+
+' === Sincroniza submontagens recursivamente ===
+Private Sub SincronizarSubmontagensRecursivo(asm As AssemblyDocument, mapaGlobal As List(Of Tuple(Of String, String, String)))
+    Try
+        For Each occ As ComponentOccurrence In asm.ComponentDefinition.Occurrences
+            If occ.DefinitionDocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+                Try
+                    Dim subDoc As Document = Nothing
+
+                    ' Tenta abrir submontagem se não estiver carregada
+                    Try
+                        subDoc = ThisApplication.Documents.Item(occ.Definition.Document.FullFileName)
+                    Catch
+                        subDoc = ThisApplication.Documents.Open(occ.Definition.Document.FullFileName, False)
+                    End Try
+
+                    Dim subAsm As AssemblyDocument = TryCast(subDoc, AssemblyDocument)
+                    If subAsm Is Nothing Then Continue For
+
+                    Dim mapaLocalSub As Dictionary(Of String, String) = ObterMapaLocal(subAsm)
+                    SincronizarItemNumbers(mapaGlobal, mapaLocalSub, subAsm, subAsm.DisplayName)
+
+                    Try : subAsm.Save2(True) : Catch : End Try
+
+                    SincronizarSubmontagensRecursivo(subAsm, mapaGlobal)
+
+                Catch exInner As Exception
+                    'MessageBox.Show("Erro ao processar submontagem: " & exInner.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                End Try
+            End If
+        Next
+
+    Catch ex As Exception
+        'MessageBox.Show("Erro ao processar submontagens: " & ex.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error)
+    End Try
+End Sub
