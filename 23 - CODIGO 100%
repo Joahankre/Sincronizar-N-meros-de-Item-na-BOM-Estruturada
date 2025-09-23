@@ -1,0 +1,19 @@
+' === Formatador melhorado para exibir o mapa completo ===
+Private Function FormatarMapaParaTexto(mapa As List(Of Tuple(Of String, String, String))) As String
+    Dim builder As New StringBuilder()
+
+    ' Cabeçalho com colunas alinhadas
+    builder.AppendLine("PART NUMBER".PadRight(40) & "ITEM NUMBER".PadRight(15) & "CAMINHO HIERÁRQUICO")
+    builder.AppendLine(New String("-"c, 100))
+
+    ' Dados
+    For Each par In mapa
+        Dim partNumber As String = par.Item1
+        Dim itemNumber As String = par.Item2
+        Dim caminho As String = par.Item3
+
+        builder.AppendLine(partNumber.PadRight(40) & itemNumber.PadRight(15) & caminho)
+    Next
+
+    Return builder.ToString()
+End Function
