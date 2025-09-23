@@ -1,0 +1,254 @@
+Imports Inventor
+Imports System.Windows.Forms
+' Importações necessárias
+
+Sub Main()
+    Dim oDoc As Document = ThisApplication.ActiveDocument
+
+    ' Verifica se o documento aberto é uma montagem
+    If oDoc Is Nothing OrElse oDoc.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+        MessageBox.Show("Abra uma montagem antes de rodar esta regra.", "Documento Inválido", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+        Return
+    End If
+
+    Dim oAsm As AssemblyDocument = CType(oDoc, AssemblyDocument)
+
+    ' Passo 1: Construir o dicionário completo da montagem pai (todos os níveis)
+    Dim mapaPai As Dictionary(Of String, String) = ObterMapaCompleto(oAsm)
+
+    If mapaPai.Count = 0 Then
+        MessageBox.Show("Nenhum item encontrado no BOM estruturado da montagem principal.", "Aviso", MessageBoxButtons.OK, MessageBoxIcon.Information)
+        Return
+    End If
+
+    ' Passo 2: Sincronizar a montagem aberta atual (pode ser montagem pai ou submontagem isolada)
+    ' Construir mapa local da montagem atual
+    Dim mapaLocal As Dictionary(Of String, String) = ObterMapaLocal(oAsm)
+
+    ' Sincronizar item numbers da montagem atual com o mapa completo da montagem pai
+    SincronizarItemNumbers(mapaPai, mapaLocal, oAsm)
+
+    ' Passo 3: Abrir e sincronizar recursivamente todas as submontagens
+    SincronizarSubmontagensRecursivo(oAsm, mapaPai)
+
+    ' Salvar a montagem após sincronização
+    Try
+        oAsm.Save2(True)
+    Catch ex As Exception
+        MessageBox.Show("Falha ao salvar o documento: " & oAsm.FullFileName, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error)
+    End Try
+
+    MessageBox.Show("Sincronização concluída com sucesso!", "Sucesso", MessageBoxButtons.OK, MessageBoxIcon.Information)
+End Sub
+
+' === Função para construir o dicionário completo da montagem pai (todos os níveis de submontagens) ===
+Private Function ObterMapaCompleto(assemblyDoc As AssemblyDocument) As Dictionary(Of String, String)
+    Dim mapa As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+
+    Try
+        ' Usa o BOM estruturado
+        Dim bom As BOM = assemblyDoc.ComponentDefinition.BOM
+        bom.StructuredViewEnabled = True
+        bom.StructuredViewFirstLevelOnly = False
+
+        Dim view As BOMView = Nothing
+        For Each bv As BOMView In bom.BOMViews
+            If bv.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+                view = bv
+                Exit For
+            End If
+        Next
+
+        If view Is Nothing Then Return mapa
+
+        ' Percorre todas as linhas do BOM estruturado, incluindo submontagens
+        For Each row As BOMRow In view.BOMRows
+            AdicionarAoMapaRecursivo(Row, mapa)
+        Next
+
+    Catch ex As Exception
+        MessageBox.Show("Erro ao construir mapa completo: " & ex.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error)
+    End Try
+
+    Return mapa
+End Function
+
+' === Função recursiva para adicionar os itens ao dicionário, incluindo submontagens ===
+Private Sub AdicionarAoMapaRecursivo(row As BOMRow, mapa As Dictionary(Of String, String))
+    Try
+        ' Obtem o Part Number do componente
+        Dim partNumber As String = ""
+
+        If row.ComponentDefinitions.Count > 0 Then
+            Dim doc As Document = row.ComponentDefinitions.Item(1).Document
+            partNumber = doc.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value.ToString()
+        End If
+
+        Dim itemNumber As String = row.ItemNumber
+
+        If partNumber <> "" AndAlso Not mapa.ContainsKey(partNumber) AndAlso itemNumber <> "" Then
+            mapa.Add(partNumber, itemNumber)
+        End If
+
+        ' Recursivamente para os filhos (submontagens)
+        If row.ChildRows IsNot Nothing Then
+            For Each childRow As BOMRow In row.ChildRows
+                AdicionarAoMapaRecursivo(childRow, mapa)
+            Next
+        End If
+
+    Catch ex As Exception
+        ' Ignora erros individuais para garantir o fluxo contínuo
+    End Try
+End Sub
+
+' === Função para construir o dicionário local da montagem aberta isolada (apenas 1 nível) ===
+Private Function ObterMapaLocal(assemblyDoc As AssemblyDocument) As Dictionary(Of String, String)
+    Dim mapa As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+
+    Try
+        Dim bom As BOM = assemblyDoc.ComponentDefinition.BOM
+        bom.StructuredViewEnabled = True
+        bom.StructuredViewFirstLevelOnly = True ' Apenas o nível atual
+
+        Dim view As BOMView = Nothing
+        For Each bv As BOMView In bom.BOMViews
+            If bv.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+                view = bv
+                Exit For
+            End If
+        Next
+
+        If view Is Nothing Then Return mapa
+
+        For Each row As BOMRow In view.BOMRows
+            Try
+                Dim partNumber As String = ""
+                If Row.ComponentDefinitions.Count > 0 Then
+                    Dim doc As Document = Row.ComponentDefinitions.Item(1).Document
+                    partNumber = doc.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value.ToString()
+                End If
+
+                Dim itemNumber As String = Row.ItemNumber
+
+                If partNumber <> "" AndAlso Not mapa.ContainsKey(partNumber) AndAlso itemNumber <> "" Then
+                    mapa.Add(partNumber, itemNumber)
+                End If
+
+            Catch ex As Exception
+                ' Ignora erros
+            End Try
+        Next
+
+    Catch ex As Exception
+        MessageBox.Show("Erro ao construir mapa local: " & ex.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error)
+    End Try
+
+    Return mapa
+End Function
+
+' === Função para sincronizar os item numbers da montagem atual com o mapa completo da montagem pai ===
+Private Sub SincronizarItemNumbers(mapaPai As Dictionary(Of String, String), mapaLocal As Dictionary(Of String, String), assemblyDoc As AssemblyDocument)
+    Try
+        Dim bom As BOM = assemblyDoc.ComponentDefinition.BOM
+        bom.StructuredViewEnabled = True
+        bom.StructuredViewFirstLevelOnly = True
+
+        Dim view As BOMView = Nothing
+        For Each bv As BOMView In bom.BOMViews
+            If bv.ViewType = BOMViewTypeEnum.kStructuredBOMViewType Then
+                view = bv
+                Exit For
+            End If
+        Next
+
+        If view Is Nothing Then Return
+
+        For Each row As BOMRow In view.BOMRows
+            Try
+                If Row.ComponentDefinitions.Count > 0 Then
+                    Dim doc As Document = Row.ComponentDefinitions.Item(1).Document
+                    Dim partNumber As String = doc.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value.ToString()
+
+                    If mapaPai.ContainsKey(partNumber) Then
+                        Dim itemNumberPai As String = mapaPai(partNumber)
+
+                        ' Apenas altera se for diferente para evitar operações desnecessárias
+                        If Row.ItemNumber <> itemNumberPai Then
+                            Row.ItemNumber = itemNumberPai
+                        End If
+                    End If
+                End If
+            Catch ex As Exception
+                ' Ignora erros
+            End Try
+        Next
+
+        ' Salva montagem após alteração
+        Try
+            assemblyDoc.Save2(True)
+        Catch ex As Exception
+            ' Ignora falha ao salvar
+        End Try
+
+    Catch ex As Exception
+        MessageBox.Show("Erro ao sincronizar item numbers: " & ex.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error)
+    End Try
+End Sub
+
+' === Função recursiva para abrir todas as submontagens e sincronizá-las ===
+Private Sub SincronizarSubmontagensRecursivo(parentAsm As AssemblyDocument, mapaPai As Dictionary(Of String, String))
+    Try
+        For Each occ As ComponentOccurrence In parentAsm.ComponentDefinition.Occurrences
+            If occ.DefinitionDocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+                Try
+                    ' Abre a submontagem
+                    Dim subDoc As Document = Nothing
+
+                    Try
+                        ' Tenta obter documento já aberto
+                        subDoc = ThisApplication.Documents.Item(occ.Definition.Document.FullFileName)
+                    Catch ex As Exception
+                        ' Se não estiver aberto, abre o documento
+                        subDoc = ThisApplication.Documents.Open(occ.Definition.Document.FullFileName, False)
+                    End Try
+					                    ' Verifica se a submontagem foi aberta corretamente
+                    Dim subAsm As AssemblyDocument = TryCast(subDoc, AssemblyDocument)
+                    If subAsm IsNot Nothing Then
+                        ' Cria o mapa local da submontagem aberta
+                        Dim mapaLocalSub As Dictionary(Of String, String) = ObterMapaLocal(subAsm)
+
+                        ' Sincroniza os números de item da submontagem com o mapa completo da montagem pai
+                        SincronizarItemNumbers(mapaPai, mapaLocalSub, subAsm)
+
+                        ' Salva a submontagem após sincronização
+                        Try
+                            subAsm.Save2(True)
+                        Catch exSave As Exception
+                            ' Ignora falha ao salvar submontagem, continua a execução
+                        End Try
+
+                        ' Recursivamente abre e sincroniza as sub-submontagens
+                        SincronizarSubmontagensRecursivo(subAsm, mapaPai)
+                    End If
+                Catch exInner As Exception
+                    ' Ignora erro em submontagens específicas para não interromper o fluxo
+                    MessageBox.Show("Erro ao processar submontagem: " & exInner.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                End Try
+            End If
+        Next
+    Catch ex As Exception
+        MessageBox.Show("Erro ao processar submontagens: " & ex.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error)
+    End Try
+End Sub
+
+' === Função para verificar se um documento da submontagem está aberto ===
+Private Function SubmontagemAberta(ocorrencia As ComponentOccurrence) As Boolean
+    Dim subDoc As Document = Nothing
+    Try
+        subDoc = ThisApplication.Documents.Item(ocorrencia.Definition.Document.FullFileName)
+        Return subDoc IsNot Nothing
+    Catch ex As Exception
+        Return False
+    End Try
+End Function
