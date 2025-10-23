@@ -1,0 +1,173 @@
+Imports Inventor
+Imports System.Windows.Forms
+Imports System.Text
+Imports System.Linq
+' Imports padrão do iLogic
+
+Sub Main()
+    ' GUID do Frame Generator - altere conforme necessário
+    Const FRAME_GENERATOR_GUID As String = "{AC211AE0-A7A5-4589-916D-81C529DA6D17}"
+
+    ' Obtém o documento ativo
+    Dim doc As Document = ThisApplication.ActiveDocument
+
+    ' Verifica se tem uma montagem aberta
+    If doc Is Nothing OrElse doc.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+        MessageBox.Show("Por favor, abra uma montagem antes de executar esta regra.", "Documento Inválido", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+        Return
+    End If
+
+    Dim asmDoc As AssemblyDocument = CType(doc, AssemblyDocument)
+
+    ' Obtém o mapa completo do BOM da montagem principal
+    Dim mapaCompleto As List(Of Tuple(Of String, String, String)) = ObterMapaCompleto(asmDoc)
+
+    If mapaCompleto.Count = 0 Then
+        MessageBox.Show("Nenhum item encontrado no BOM estruturado da montagem.", "Aviso", MessageBoxButtons.OK, MessageBoxIcon.Information)
+        Return
+    End If
+
+    ' Exibe mapa completo da montagem principal
+    ShowFormattedResults(FormatarMapaParaTexto(mapaCompleto), "Mapa Completo da Montagem")
+
+    ' Tenta encontrar o subassemblies do Frame Generator pelo GUID
+    Dim frameRow As BOMRow = EncontrarFrameGeneratorNaLista(asmDoc, FRAME_GENERATOR_GUID)
+
+    If frameRow Is Nothing Then
+        MessageBox.Show("Submontagem Frame Generator não encontrada no BOM.", "Informação", MessageBoxButtons.OK, MessageBoxIcon.Information)
+        Return
+    End If
+
+    ' Monta o mapa apenas para o Frame Generator (recursivo)
+    Dim mapaFrame As New List(Of Tuple(Of String, String, String))()
+    Dim caminhoRaiz As String = asmDoc.DisplayName
+    AdicionarAoMapaRecursivo(frameRow, mapaFrame, caminhoRaiz)
+
+    ' Exibe mapa do Frame Generator
+    ShowFormattedResults(FormatarMapaParaTexto(mapaFrame), "Itens do Frame Generator")
+
+    MessageBox.Show("Processamento finalizado.", "Sucesso", MessageBoxButtons.OK, MessageBoxIcon.Information)
+End Sub
+
+' Função para obter o mapa completo do BOM estruturado
+Function ObterMapaCompleto(asm As AssemblyDocument) As List(Of Tuple(Of String, String, String))
+    Dim mapa As New List(Of Tuple(Of String, String, String))()
+
+    Try
+        Dim bom As BOM = asm.ComponentDefinition.BOM
+        bom.StructuredViewEnabled = True
+        bom.StructuredViewFirstLevelOnly = False
+
+        Dim view As BOMView = bom.BOMViews _
+            .Cast(Of BOMView)() _
+            .FirstOrDefault(Function(v) v.ViewType = BOMViewTypeEnum.kStructuredBOMViewType)
+
+        If view Is Nothing Then Return mapa
+
+        For Each row As BOMRow In view.BOMRows
+            AdicionarAoMapaRecursivo(Row, mapa, asm.DisplayName)
+        Next
+    Catch ex As Exception
+        MessageBox.Show("Erro ao construir o mapa completo: " & ex.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error)
+    End Try
+
+    Return mapa
+End Function
+
+' Função recursiva para adicionar itens ao mapa
+Sub AdicionarAoMapaRecursivo(row As BOMRow, mapa As List(Of Tuple(Of String, String, String)), parentPath As String)
+    Try
+        If row.ComponentDefinitions.Count = 0 Then Exit Sub
+
+        Dim doc As Document = row.ComponentDefinitions.Item(1).Document
+        Dim partNumber As String = ""
+
+        ' Tenta pegar Part Number da propriedade, senão usa o nome do item
+        Try
+            partNumber = doc.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value.ToString()
+        Catch
+            partNumber = row.ItemName
+        End Try
+
+        Dim itemNumber As String = row.ItemNumber
+        Dim caminho As String = parentPath & "\" & doc.FullFileName
+
+        mapa.Add(New Tuple(Of String, String, String)(partNumber, itemNumber, caminho))
+
+        ' Chama recursivamente para os filhos
+        If row.ChildRows IsNot Nothing Then
+            For Each child As BOMRow In row.ChildRows
+                AdicionarAoMapaRecursivo(child, mapa, caminho)
+            Next
+        End If
+    Catch
+        ' Ignora erros individuais para continuar o processamento
+    End Try
+End Sub
+
+' Função para encontrar o subassembly Frame Generator pelo GUID no BOM
+Function EncontrarFrameGeneratorNaLista(asm As AssemblyDocument, frameGUID As String) As BOMRow
+    Dim bom As BOM = asm.ComponentDefinition.BOM
+    bom.StructuredViewEnabled = True
+    bom.StructuredViewFirstLevelOnly = False
+
+    Dim view As BOMView = bom.BOMViews _
+        .Cast(Of BOMView)() _
+        .FirstOrDefault(Function(v) v.ViewType = BOMViewTypeEnum.kStructuredBOMViewType)
+
+    If view Is Nothing Then Return Nothing
+
+    Return EncontrarFrameGeneratorRecursivo(view.BOMRows, frameGUID)
+End Function
+
+' Função recursiva para buscar subassembly Frame Generator no BOM
+Function EncontrarFrameGeneratorRecursivo(rows As BOMRowsEnumerator, frameGUID As String) As BOMRow
+    For Each row As BOMRow In rows
+        If Row.ComponentDefinitions.Count > 0 Then
+            Dim doc As Document = Row.ComponentDefinitions.Item(1).Document
+            If doc.DocumentInterests.HasInterest(frameGUID) Then
+                Return Row
+            End If
+        End If
+
+        If Row.ChildRows IsNot Nothing Then
+            Dim resultado As BOMRow = EncontrarFrameGeneratorRecursivo(Row.ChildRows, frameGUID)
+            If resultado IsNot Nothing Then Return resultado
+        End If
+    Next
+    Return Nothing
+End Function
+
+' Função para formatar a lista para exibição
+Function FormatarMapaParaTexto(mapa As List(Of Tuple(Of String, String, String))) As String
+    Dim sb As New StringBuilder()
+    Dim col1Width As Integer = 70 ' Part Number
+    Dim col2Width As Integer = 30 ' Item Number
+
+    sb.AppendLine("PART NUMBER".PadRight(col1Width) & "ITEM NUMBER".PadRight(col2Width) & "HIERARCHICAL PATH")
+    sb.AppendLine(New String("-"c, col1Width + col2Width + 70))
+
+    For Each item In mapa
+        sb.AppendLine(item.Item1.PadRight(col1Width) & item.Item2.PadRight(col2Width) & item.Item3)
+    Next
+
+    Return sb.ToString()
+End Function
+
+' Sub para mostrar os resultados em uma janela
+Sub ShowFormattedResults(message As String, Optional title As String = "Resultados")
+    Dim form As New Form With {
+        .Text = title,
+        .Width = 900,
+        .Height = 600,
+        .StartPosition = FormStartPosition.CenterScreen
+    }
+    Dim richText As New RichTextBox With {
+        .Dock = DockStyle.Fill,
+        .ReadOnly = True,
+		.Text = message
+		}
+    form.Controls.Add(richText)
+    form.ShowDialog()
+End Sub
+
