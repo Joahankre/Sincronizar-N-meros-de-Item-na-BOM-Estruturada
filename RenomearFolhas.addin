@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Addin Type="Standard">
+  <ClassId>{e47b1465-fc28-4ea3-ba6a-b89838285392}</ClassId>
+  <ClientId>{e47b1465-fc28-4ea3-ba6a-b89838285392}</ClientId>
+
+  <DisplayName Language="1033">Renomear Folhas</DisplayName>
+  <Description Language="1033">Renomeia folhas de desenho com base nas propriedades do modelo</Description>
+
+  <Assembly>C:\ProgramData\Autodesk\ApplicationPlugins\RenomearFolhas.bundle\Contents\RenomearFolhas.dll</Assembly>
+  <Class>StandardAddInServerFolhas</Class>
+
+  <LoadOnStartUp>1</LoadOnStartUp>
+  <UserUnloadable>1</UserUnloadable>
+  <Hidden>0</Hidden>
+  <UserInterfaceVersion>1</UserInterfaceVersion>
+  <LoadBehavior>4</LoadBehavior>
+</Addin>
