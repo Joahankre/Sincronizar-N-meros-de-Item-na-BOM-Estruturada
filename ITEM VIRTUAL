@@ -1,0 +1,75 @@
+Sub Main()
+
+    Dim oAsm As AssemblyDocument = ThisDoc.Document
+    ProcessOccurrences(oAsm.ComponentDefinition.Occurrences)
+
+    MessageBox.Show("Virtuais criados com sucesso.")
+
+End Sub
+
+Sub ProcessOccurrences(oOccs As ComponentOccurrences)
+
+    ' Copiar para lista temporária
+    Dim lista As New List(Of ComponentOccurrence)
+    For Each oOcc As ComponentOccurrence In oOccs
+        lista.Add(oOcc)
+    Next
+
+    For Each oOcc As ComponentOccurrence In lista
+
+        If oOcc.Suppressed Then Continue For
+
+        ' Ignorar componentes virtuais
+        If TypeOf oOcc.Definition Is VirtualComponentDefinition Then Continue For
+
+        ' Se for peça, criar virtual
+        If TypeOf oOcc.Definition Is PartComponentDefinition Then
+            If Not VirtualJaExiste(oOcc) Then
+                CriarVirtualSimbolico(oOcc)
+            End If
+
+        ' Se for montagem, processa recursivamente
+        ElseIf TypeOf oOcc.Definition Is AssemblyComponentDefinition Then
+            ProcessOccurrences(oOcc.SubOccurrences)
+        End If
+
+    Next
+
+End Sub
+
+Function VirtualJaExiste(oOcc As ComponentOccurrence) As Boolean
+
+    Dim parentDef As AssemblyComponentDefinition = oOcc.Parent
+    For Each testOcc As ComponentOccurrence In parentDef.Occurrences
+        ' Detecta virtual pelo tipo
+        If TypeOf testOcc.Definition Is VirtualComponentDefinition AndAlso testOcc.Name.StartsWith(oOcc.Name & "_MP") Then
+            Return True
+        End If
+    Next
+    Return False
+
+End Function
+
+Sub CriarVirtualSimbolico(oOcc As ComponentOccurrence)
+
+    Dim parentDef As AssemblyComponentDefinition = oOcc.Parent
+    Dim occs As ComponentOccurrences = parentDef.Occurrences
+    Dim identity As Matrix = ThisApplication.TransientGeometry.CreateMatrix()
+
+    ' Cria o virtual diretamente
+    Dim virtOcc As ComponentOccurrence
+    virtOcc = occs.AddVirtual(oOcc.Name & "_MP", identity)
+
+    ' Copiar descrição da peça
+    Try
+        Dim desc As String = oOcc.Definition.Document.PropertySets _
+            .Item("Design Tracking Properties") _
+            .Item("Description").Value
+
+        virtOcc.Definition.PropertySets _
+            .Item("Design Tracking Properties") _
+            .Item("Description").Value = desc & " - MATÉRIA PRIMA"
+    Catch
+    End Try
+
+End Sub
