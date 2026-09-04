@@ -1,0 +1,1539 @@
+Imports Inventor
+Imports System.Windows.Forms
+Imports System.Text
+Imports System.Linq
+Imports System.Collections.Generic
+
+' ================================================================
+' iLogic
+'
+' SINCRONIZAÇÃO HIERÁRQUICA DE ITEM NUMBERS
+'
+' ================================================================
+'
+' OBJETIVO
+'
+' A PRIMEIRA FOLHA DO DRAWING contém a MONTAGEM MESTRE.
+'
+' A FOLHA ATIVA representa uma determinada montagem/conjunto.
+'
+' O código localiza essa montagem na estrutura BOM da montagem
+' mestre e sincroniza os Item Numbers da montagem correspondente.
+'
+'
+' EXEMPLO
+'
+' MONTAGEM MESTRE
+'
+' 1 MONTAGEM PRINCIPAL
+' 1.1 PERNA A
+' 1.1.1 CHAPA
+' 1.1.2 SUPORTE
+' 1.1.3 PARAFUSO
+' 1.1.3.1 PORCA
+' 1.1.3.2 ARRUELA
+'
+'
+' Se a folha ativa representa PERNA A:
+'
+' A BOM da PERNA A receberá:
+'
+' CHAPA -> 1.1.1
+' SUPORTE -> 1.1.2
+' PARAFUSO -> 1.1.3
+'
+' E, se PARAFUSO for uma submontagem:
+'
+' PORCA -> 1.1.3.1
+' ARRUELA -> 1.1.3.2
+'
+'
+' ================================================================
+'
+' PRINCIPAL DIFERENÇA EM RELAÇÃO AO CÓDIGO ORIGINAL
+'
+' NÃO é criado um mapa global:
+'
+' PartNumber -> ItemNumber
+'
+' pois isso gera problemas quando o mesmo Part Number aparece
+' várias vezes em diferentes ramos da montagem.
+'
+' Em vez disso:
+'
+' FOLHA ATIVA
+' ↓
+' DOCUMENTO DA MONTAGEM
+' ↓
+' BOM ROW CORRESPONDENTE
+' ↓
+' FILHOS DIRETOS
+' ↓
+' SUBMONTAGENS DOS FILHOS
+'
+' A estrutura da BOM mestre é utilizada como fonte.
+'
+' ================================================================
+
+Sub Main()
+
+' ============================================================
+' VERIFICAR DOCUMENTO ATIVO
+' ============================================================
+
+If ThisApplication.ActiveDocumentType <> _
+    DocumentTypeEnum.kDrawingDocumentObject Then
+
+    MessageBox.Show( _
+        "Esta regra deve ser executada em um Drawing.", _
+        "iLogic", _
+        MessageBoxButtons.OK, _
+        MessageBoxIcon.Warning)
+
+    Return
+
+End If
+
+Dim drawDoc As DrawingDocument = _
+    CType( _
+        ThisApplication.ActiveDocument, _
+        DrawingDocument)
+
+' ============================================================
+' VERIFICAR FOLHAS
+' ============================================================
+
+If drawDoc.Sheets.Count = 0 Then
+
+    MessageBox.Show( _
+        "O Drawing não possui folhas.", _
+        "iLogic")
+
+    Return
+
+End If
+
+' ============================================================
+' FOLHA ATIVA
+' ============================================================
+
+Dim activeSheet As Sheet = _
+    drawDoc.ActiveSheet
+
+' ============================================================
+' PRIMEIRA FOLHA
+'
+' Sempre considerada a folha da montagem mestre.
+' ============================================================
+
+Dim masterSheet As Sheet = _
+    drawDoc.Sheets.Item(1)
+
+' ============================================================
+' LOCALIZAR MONTAGEM MESTRE
+' ============================================================
+
+Dim masterAssembly As AssemblyDocument = Nothing
+
+Dim masterView As DrawingView = Nothing
+
+If Not GetAssemblyFromSheet( _
+    masterSheet, _
+    masterAssembly, _
+    masterView) Then
+
+    MessageBox.Show( _
+        "Não foi encontrada uma montagem na primeira folha." _
+        & vbCrLf & vbCrLf _
+        & "Folha: " _
+        & masterSheet.Name, _
+        "iLogic", _
+        MessageBoxButtons.OK, _
+        MessageBoxIcon.Warning)
+
+    Return
+
+End If
+
+' ============================================================
+' LOCALIZAR MONTAGEM REPRESENTADA PELA FOLHA ATIVA
+' ============================================================
+
+Dim targetAssembly As AssemblyDocument = Nothing
+
+Dim targetView As DrawingView = Nothing
+
+If Not GetAssemblyFromSheet( _
+    activeSheet, _
+    targetAssembly, _
+    targetView) Then
+
+    MessageBox.Show( _
+        "Não foi encontrada uma montagem na folha ativa." _
+        & vbCrLf & vbCrLf _
+        & "Folha: " _
+        & activeSheet.Name _
+        & vbCrLf & vbCrLf _
+        & "A folha ativa precisa possuir uma DrawingView " _
+        & "referenciando uma montagem.", _
+        "iLogic", _
+        MessageBoxButtons.OK, _
+        MessageBoxIcon.Warning)
+
+    Return
+
+End If
+
+' ============================================================
+' SE A FOLHA ATIVA É A PRÓPRIA MONTAGEM MESTRE
+'
+' Não existe submontagem para sincronizar.
+' ============================================================
+
+If SameDocument( _
+    masterAssembly, _
+    targetAssembly) Then
+
+    MessageBox.Show( _
+        "A folha ativa representa a própria montagem mestre." _
+        & vbCrLf & vbCrLf _
+        & "Nenhuma alteração foi realizada.", _
+        "iLogic", _
+        MessageBoxButtons.OK, _
+        MessageBoxIcon.Information)
+
+    Return
+
+End If
+
+' ============================================================
+' GARANTIR QUE A BOM MESTRE ESTEJA DISPONÍVEL
+' ============================================================
+
+Dim masterBOMView As BOMView = _
+    GetStructuredBOMView(masterAssembly)
+
+If masterBOMView Is Nothing Then
+
+    MessageBox.Show( _
+        "Não foi possível acessar a BOM Structured da " _
+        & "montagem mestre." _
+        & vbCrLf & vbCrLf _
+        & masterAssembly.DisplayName, _
+        "iLogic", _
+        MessageBoxButtons.OK, _
+        MessageBoxIcon.Error)
+
+    Return
+
+End If
+
+' ============================================================
+' PART NUMBER DO ALVO
+' ============================================================
+
+Dim targetPN As String = _
+    GetPartNumber(targetAssembly)
+
+If String.IsNullOrWhiteSpace(targetPN) Then
+
+    MessageBox.Show( _
+        "A montagem representada pela folha ativa não possui " _
+        & "Part Number válido." _
+        & vbCrLf & vbCrLf _
+        & targetAssembly.DisplayName, _
+        "iLogic")
+
+    Return
+
+End If
+
+' ============================================================
+' LOCALIZAR O RAMO CORRESPONDENTE NA BOM MESTRE
+'
+' A pesquisa é hierárquica.
+'
+' NÃO utiliza Item Number para localizar.
+' ============================================================
+
+Dim targetMasterRow As BOMRow = _
+    FindBOMRowByDocument( _
+        masterBOMView.BOMRows, _
+        targetAssembly)
+
+If targetMasterRow Is Nothing Then
+
+    MessageBox.Show( _
+        "A montagem da folha ativa não foi encontrada " _
+        & "na BOM da montagem mestre." _
+        & vbCrLf & vbCrLf _
+        & "FOLHA ATIVA:" _
+        & vbCrLf _
+        & activeSheet.Name _
+        & vbCrLf & vbCrLf _
+        & "MONTAGEM:" _
+        & vbCrLf _
+        & targetAssembly.DisplayName _
+        & vbCrLf & vbCrLf _
+        & "PART NUMBER:" _
+        & vbCrLf _
+        & targetPN, _
+        "iLogic", _
+        MessageBoxButtons.OK, _
+        MessageBoxIcon.Warning)
+
+    Return
+
+End If
+
+' ============================================================
+' RESULTADOS
+' ============================================================
+
+Dim resultados As New List(Of String)
+
+resultados.Add( _
+    "MONTAGEM MESTRE: " _
+    & masterAssembly.DisplayName)
+
+resultados.Add( _
+    "FOLHA ATIVA: " _
+    & activeSheet.Name)
+
+resultados.Add( _
+    "MONTAGEM ALVO: " _
+    & targetAssembly.DisplayName)
+
+resultados.Add( _
+    "PART NUMBER: " _
+    & targetPN)
+
+resultados.Add( _
+    "ITEM NUMBER NA BOM MESTRE: " _
+    & SafeItemNumber(targetMasterRow))
+
+resultados.Add("")
+
+' ============================================================
+' SINCRONIZAR A MONTAGEM ALVO
+'
+' O targetMasterRow representa o conjunto na BOM mestre.
+'
+' Seus filhos representam as linhas da BOM da submontagem.
+' ============================================================
+
+Dim alteracoes As Integer = 0
+
+Dim erros As Integer = 0
+
+SincronizarMontagemComBOMMestre( _
+    targetAssembly, _
+    targetMasterRow, _
+    resultados, _
+    alteracoes, _
+    erros)
+
+' ============================================================
+' SALVAR
+' ============================================================
+
+Try
+
+    targetAssembly.Save2(True)
+
+Catch ex As Exception
+
+    resultados.Add( _
+        "ERRO AO SALVAR: " _
+        & ex.Message)
+
+    erros += 1
+
+End Try
+
+' ============================================================
+' RESULTADO
+' ============================================================
+
+resultados.Add("")
+resultados.Add("--------------------------------------------")
+resultados.Add("ALTERAÇÕES: " & alteracoes)
+resultados.Add("ERROS: " & erros)
+resultados.Add("--------------------------------------------")
+
+ShowResults( _
+    resultados, _
+    alteracoes, _
+    erros)
+
+End Sub
+
+' ################################################################
+' LOCALIZAR MONTAGEM EM UMA FOLHA
+' ################################################################
+
+Private Function GetAssemblyFromSheet( _
+ByVal sheet As Sheet, _
+ByRef assemblyDoc As AssemblyDocument, _
+ByRef assemblyView As DrawingView) _
+As Boolean
+
+assemblyDoc = Nothing
+assemblyView = Nothing
+
+If sheet Is Nothing Then
+    Return False
+End If
+
+' ============================================================
+' PRIMEIRO: VIEWS PRINCIPAIS
+' ============================================================
+
+Try
+
+    For Each view As DrawingView _
+        In sheet.DrawingViews
+
+        If View Is Nothing Then
+            Continue For
+        End If
+
+        If Not IsViewAvailable(View) Then
+            Continue For
+        End If
+
+        Dim doc As Document = _
+            GetReferencedDocument(View)
+
+        If doc Is Nothing Then
+            Continue For
+        End If
+
+        If doc.DocumentType = _
+            DocumentTypeEnum.kAssemblyDocumentObject Then
+
+            assemblyDoc = _
+                TryCast(doc, AssemblyDocument)
+
+            assemblyView = View
+
+            If assemblyDoc IsNot Nothing Then
+                Return True
+            End If
+
+        End If
+
+    Next
+
+Catch
+
+End Try
+
+' ============================================================
+' SEGUNDO: CHILD VIEWS
+' ============================================================
+
+Try
+
+    For Each view As DrawingView _
+        In sheet.DrawingViews
+
+        If View Is Nothing Then
+            Continue For
+        End If
+
+        If FindAssemblyInChildViews( _
+            View, _
+            assemblyDoc, _
+            assemblyView) Then
+
+            Return True
+
+        End If
+
+    Next
+
+Catch
+
+End Try
+
+Return False
+
+End Function
+
+' ################################################################
+' PESQUISAR MONTAGEM NAS CHILD VIEWS
+' ################################################################
+
+Private Function FindAssemblyInChildViews( _
+ByVal parentView As DrawingView, _
+ByRef assemblyDoc As AssemblyDocument, _
+ByRef assemblyView As DrawingView) _
+As Boolean
+
+Try
+
+    For Each child As DrawingView _
+        In parentView.ChildViews
+
+        If child Is Nothing Then
+            Continue For
+        End If
+
+        If Not IsViewAvailable(child) Then
+            Continue For
+        End If
+
+        Dim doc As Document = _
+            GetReferencedDocument(child)
+
+        If doc IsNot Nothing Then
+
+            If doc.DocumentType = _
+                DocumentTypeEnum.kAssemblyDocumentObject Then
+
+                assemblyDoc = _
+                    TryCast(doc, AssemblyDocument)
+
+                assemblyView = child
+
+                If assemblyDoc IsNot Nothing Then
+                    Return True
+                End If
+
+            End If
+
+        End If
+
+        If FindAssemblyInChildViews( _
+            child, _
+            assemblyDoc, _
+            assemblyView) Then
+
+            Return True
+
+        End If
+
+    Next
+
+Catch
+
+End Try
+
+Return False
+
+End Function
+
+' ################################################################
+' DOCUMENTO REFERENCIADO PELA DRAWING VIEW
+' ################################################################
+
+Private Function GetReferencedDocument( _
+ByVal view As DrawingView) _
+As Document
+
+If view Is Nothing Then
+    Return Nothing
+End If
+
+Try
+
+    Dim descriptor As DocumentDescriptor = _
+        view.ReferencedDocumentDescriptor
+
+    If descriptor Is Nothing Then
+        Return Nothing
+    End If
+
+    Return descriptor.ReferencedDocument
+
+Catch
+
+    Return Nothing
+
+End Try
+
+End Function
+
+' ################################################################
+' VERIFICAR DRAWING VIEW
+' ################################################################
+
+Private Function IsViewAvailable( _
+ByVal view As DrawingView) _
+As Boolean
+
+If view Is Nothing Then
+    Return False
+End If
+
+Try
+
+    If view.Suppressed Then
+        Return False
+    End If
+
+Catch
+
+End Try
+
+Try
+
+    If Not view.Visible Then
+        Return False
+    End If
+
+Catch
+
+End Try
+
+Return True
+
+End Function
+
+' ################################################################
+' BOM STRUCTURED
+' ################################################################
+
+Private Function GetStructuredBOMView( _
+ByVal assemblyDoc As AssemblyDocument) _
+As BOMView
+
+If assemblyDoc Is Nothing Then
+    Return Nothing
+End If
+
+Try
+
+    Dim bom As BOM = _
+        assemblyDoc.ComponentDefinition.BOM
+
+    bom.StructuredViewEnabled = True
+
+    bom.StructuredViewFirstLevelOnly = False
+
+    For Each view As BOMView _
+        In bom.BOMViews
+
+        Try
+
+            If View.ViewType = _
+                BOMViewTypeEnum.kStructuredBOMViewType Then
+
+                Return View
+
+            End If
+
+        Catch
+
+        End Try
+
+    Next
+
+Catch
+
+End Try
+
+Return Nothing
+
+End Function
+
+' ################################################################
+' LOCALIZAR BOMROW PELO DOCUMENTO
+'
+' IMPORTANTE:
+'
+' A pesquisa é feita recursivamente.
+'
+' Primeiro compara FullFileName.
+' Depois utiliza Part Number como fallback.
+'
+' NÃO utiliza Item Number.
+' ################################################################
+
+Private Function FindBOMRowByDocument( _
+ByVal rows As BOMRowsEnumerator, _
+ByVal targetDoc As Document) _
+As BOMRow
+
+If rows Is Nothing Then
+    Return Nothing
+End If
+
+If targetDoc Is Nothing Then
+    Return Nothing
+End If
+
+Dim targetFile As String = _
+    SafeFullFileName(targetDoc)
+
+Dim targetPN As String = _
+    GetPartNumber(targetDoc)
+
+' ============================================================
+' PRIMEIRA PASSAGEM:
+'
+' FULL FILE NAME
+'
+' É mais específico que Part Number.
+' ============================================================
+
+For Each row As BOMRow In rows
+
+    Try
+
+        Dim rowDoc As Document = _
+            GetBOMRowDocument(Row)
+
+        If rowDoc IsNot Nothing Then
+
+            Dim rowFile As String = _
+                SafeFullFileName(rowDoc)
+
+            If Not String.IsNullOrWhiteSpace(targetFile) _
+                AndAlso _
+                Not String.IsNullOrWhiteSpace(rowFile) Then
+
+                If String.Equals( _
+                    targetFile, _
+                    rowFile, _
+                    StringComparison.OrdinalIgnoreCase) Then
+
+                    Return Row
+
+                End If
+
+            End If
+
+        End If
+
+        ' ----------------------------------------------------
+        ' FILHOS
+        ' ----------------------------------------------------
+
+        Dim children As BOMRowsEnumerator = _
+            Nothing
+
+        Try
+
+            children = Row.ChildRows
+
+        Catch
+
+        End Try
+
+        If children IsNot Nothing Then
+
+            Dim found As BOMRow = _
+                FindBOMRowByDocument( _
+                    children, _
+                    targetDoc)
+
+            If found IsNot Nothing Then
+                Return found
+            End If
+
+        End If
+
+    Catch
+
+    End Try
+
+Next
+
+' ============================================================
+' SEGUNDA PASSAGEM:
+'
+' PART NUMBER
+'
+' Usado somente se FullFileName não encontrou.
+' ============================================================
+
+If Not String.IsNullOrWhiteSpace(targetPN) Then
+
+    For Each row As BOMRow In rows
+
+        Try
+
+            Dim rowPN As String = _
+                GetBOMRowPartNumber(Row)
+
+            If SamePartNumber( _
+                rowPN, _
+                targetPN) Then
+
+                Return Row
+
+            End If
+
+            Dim children As BOMRowsEnumerator = _
+                Nothing
+
+            Try
+
+                children = Row.ChildRows
+
+            Catch
+
+            End Try
+
+            If children IsNot Nothing Then
+
+                Dim found As BOMRow = _
+                    FindBOMRowByPartNumberOnly( _
+                        children, _
+                        targetPN)
+
+                If found IsNot Nothing Then
+                    Return found
+                End If
+
+            End If
+
+        Catch
+
+        End Try
+
+    Next
+
+End If
+
+Return Nothing
+
+End Function
+
+' ################################################################
+' PESQUISA RECURSIVA POR PART NUMBER
+' ################################################################
+
+Private Function FindBOMRowByPartNumberOnly( _
+ByVal rows As BOMRowsEnumerator, _
+ByVal targetPN As String) _
+As BOMRow
+
+If rows Is Nothing Then
+    Return Nothing
+End If
+
+For Each row As BOMRow In rows
+
+    Try
+
+        If SamePartNumber( _
+            GetBOMRowPartNumber(Row), _
+            targetPN) Then
+
+            Return Row
+
+        End If
+
+        Dim children As BOMRowsEnumerator = _
+            Nothing
+
+        Try
+
+            children = Row.ChildRows
+
+        Catch
+
+        End Try
+
+        If children IsNot Nothing Then
+
+            Dim found As BOMRow = _
+                FindBOMRowByPartNumberOnly( _
+                    children, _
+                    targetPN)
+
+            If found IsNot Nothing Then
+                Return found
+            End If
+
+        End If
+
+    Catch
+
+    End Try
+
+Next
+
+Return Nothing
+
+End Function
+
+' ################################################################
+' SINCRONIZAR UMA MONTAGEM
+'
+' targetMasterRow:
+'
+' É a BOMRow da montagem na BOM mestre.
+'
+' Os filhos dessa BOMRow são comparados com os filhos da BOM
+' interna da montagem correspondente.
+' ################################################################
+
+Private Sub SincronizarMontagemComBOMMestre( _
+ByVal assemblyDoc As AssemblyDocument, _
+ByVal masterRow As BOMRow, _
+ByVal resultados As List(Of String), _
+ByRef alteracoes As Integer, _
+ByRef erros As Integer)
+
+If assemblyDoc Is Nothing Then
+    Return
+End If
+
+If masterRow Is Nothing Then
+    Return
+End If
+
+Dim localBOMView As BOMView = _
+    GetStructuredBOMView(assemblyDoc)
+
+If localBOMView Is Nothing Then
+
+    resultados.Add( _
+        "ERRO BOM: " _
+        & assemblyDoc.DisplayName)
+
+    erros += 1
+
+    Return
+
+End If
+
+' ============================================================
+' FILHOS DA MONTAGEM MESTRE
+' ============================================================
+
+Dim masterChildren As BOMRowsEnumerator = _
+    Nothing
+
+Try
+
+    masterChildren = _
+        masterRow.ChildRows
+
+Catch
+
+End Try
+
+If masterChildren Is Nothing Then
+
+    resultados.Add( _
+        "Sem filhos na BOM mestre: " _
+        & assemblyDoc.DisplayName)
+
+    Return
+
+End If
+
+' ============================================================
+' SINCRONIZAR FILHOS
+'
+' É criada uma lista porque precisamos controlar quais linhas
+' da BOM mestre já foram utilizadas.
+'
+' Isso evita que duas linhas locais com o mesmo Part Number
+' sejam direcionadas para a mesma ocorrência mestre.
+' ============================================================
+
+Dim masterChildList As New List(Of BOMRow)
+
+For Each row As BOMRow In masterChildren
+
+    masterChildList.Add(Row)
+
+Next
+
+' ============================================================
+' BOM LOCAL
+' ============================================================
+
+Dim localRows As BOMRowsEnumerator = _
+    localBOMView.BOMRows
+
+For Each localRow As BOMRow In localRows
+
+    Try
+
+        Dim localDoc As Document = _
+            GetBOMRowDocument(localRow)
+
+        If localDoc Is Nothing Then
+            Continue For
+        End If
+
+        Dim localPN As String = _
+            GetPartNumber(localDoc)
+
+        If String.IsNullOrWhiteSpace(localPN) Then
+            Continue For
+        End If
+
+        ' ====================================================
+        ' ENCONTRAR A LINHA CORRESPONDENTE NA BOM MESTRE
+        '
+        ' A lista de candidatos ainda não utilizados evita
+        ' reutilização da mesma ocorrência.
+        ' ====================================================
+
+        Dim matchedMasterRow As BOMRow = _
+            FindMatchingUnusedMasterRow( _
+                masterChildList, _
+                localRow, _
+                localDoc)
+
+        If matchedMasterRow Is Nothing Then
+
+            resultados.Add( _
+                "NÃO ENCONTRADO: " _
+                & localPN _
+                & " | " _
+                & assemblyDoc.DisplayName)
+
+            Continue For
+
+        End If
+
+        ' ====================================================
+        ' ITEM NUMBER CORRETO
+        ' ====================================================
+
+        Dim correctItem As String = _
+            SafeItemNumber(matchedMasterRow)
+
+        If String.IsNullOrWhiteSpace(correctItem) Then
+            Continue For
+        End If
+
+        Dim currentItem As String = _
+            SafeItemNumber(localRow)
+
+        ' ====================================================
+        ' ALTERAR SOMENTE SE NECESSÁRIO
+        ' ====================================================
+
+        If Not String.Equals( _
+            currentItem, _
+            correctItem, _
+            StringComparison.OrdinalIgnoreCase) Then
+
+            Try
+
+                localRow.ItemNumber = correctItem
+
+                alteracoes += 1
+
+                resultados.Add( _
+                    localPN _
+                    & "    " _
+                    & currentItem _
+                    & " -> " _
+                    & correctItem)
+
+            Catch ex As Exception
+
+                erros += 1
+
+                resultados.Add( _
+                    "ERRO ITEM: " _
+                    & localPN _
+                    & " | " _
+                    & ex.Message)
+
+            End Try
+
+        Else
+
+            resultados.Add( _
+                localPN _
+                & "    " _
+                & currentItem _
+                & "    OK")
+
+        End If
+
+        ' ====================================================
+        ' SE A LINHA LOCAL FOR UMA SUBMONTAGEM,
+        ' SINCRONIZAR RECURSIVAMENTE.
+        '
+        ' A linha mestre correspondente é a fonte.
+        ' ====================================================
+
+        If IsAssemblyDocument(localDoc) Then
+
+            Dim subAssembly As AssemblyDocument = _
+                TryCast(localDoc, AssemblyDocument)
+
+            If subAssembly IsNot Nothing Then
+
+                SincronizarMontagemComBOMMestre( _
+                    subAssembly, _
+                    matchedMasterRow, _
+                    resultados, _
+                    alteracoes, _
+                    erros)
+
+                Try
+
+                    subAssembly.Save2(True)
+
+                Catch
+
+                End Try
+
+            End If
+
+        End If
+
+    Catch ex As Exception
+
+        erros += 1
+
+        resultados.Add( _
+            "ERRO GERAL: " _
+            & ex.Message)
+
+    End Try
+
+Next
+
+End Sub
+
+' ################################################################
+' ENCONTRAR LINHA MESTRE CORRESPONDENTE
+'
+' Ordem:
+'
+' 1. FullFileName
+' 2. Part Number
+'
+' A primeira ocorrência ainda não utilizada é escolhida.
+'
+' Isso é importante quando existem componentes repetidos.
+' ################################################################
+
+Private Function FindMatchingUnusedMasterRow( _
+ByVal masterRows As List(Of BOMRow), _
+ByVal localRow As BOMRow, _
+ByVal localDoc As Document) _
+As BOMRow
+
+If masterRows Is Nothing Then
+    Return Nothing
+End If
+
+If localDoc Is Nothing Then
+    Return Nothing
+End If
+
+Dim localFile As String = _
+    SafeFullFileName(localDoc)
+
+Dim localPN As String = _
+    GetPartNumber(localDoc)
+
+' ============================================================
+' PRIMEIRO: FULL FILE NAME
+' ============================================================
+
+For Each masterRow As BOMRow In masterRows
+
+    If IsMasterRowUsed(masterRow) Then
+        Continue For
+    End If
+
+    Dim masterDoc As Document = _
+        GetBOMRowDocument(masterRow)
+
+    If masterDoc Is Nothing Then
+        Continue For
+    End If
+
+    Dim masterFile As String = _
+        SafeFullFileName(masterDoc)
+
+    If Not String.IsNullOrWhiteSpace(localFile) _
+        AndAlso _
+        Not String.IsNullOrWhiteSpace(masterFile) Then
+
+        If String.Equals( _
+            localFile, _
+            masterFile, _
+            StringComparison.OrdinalIgnoreCase) Then
+
+            MarkMasterRowUsed(masterRow)
+
+            Return masterRow
+
+        End If
+
+    End If
+
+Next
+
+' ============================================================
+' SEGUNDO: PART NUMBER
+' ============================================================
+
+If Not String.IsNullOrWhiteSpace(localPN) Then
+
+    For Each masterRow As BOMRow In masterRows
+
+        If IsMasterRowUsed(masterRow) Then
+            Continue For
+        End If
+
+        Dim masterPN As String = _
+            GetBOMRowPartNumber(masterRow)
+
+        If SamePartNumber( _
+            localPN, _
+            masterPN) Then
+
+            MarkMasterRowUsed(masterRow)
+
+            Return masterRow
+
+        End If
+
+    Next
+
+End If
+
+Return Nothing
+
+End Function
+
+' ################################################################
+' CONTROLE DE LINHAS JÁ UTILIZADAS
+'
+' O Inventor não oferece uma propriedade simples de "Used"
+' em BOMRow. Portanto usamos uma lista global temporária baseada
+' em referência de objeto.
+' ################################################################
+
+Private usedMasterRows As New List(Of BOMRow)
+
+Private Function IsMasterRowUsed( _
+ByVal row As BOMRow) _
+As Boolean
+
+If row Is Nothing Then
+    Return False
+End If
+
+For Each usedRow As BOMRow In usedMasterRows
+
+    If Object.ReferenceEquals( _
+        usedRow, _
+        row) Then
+
+        Return True
+
+    End If
+
+Next
+
+Return False
+
+End Function
+
+Private Sub MarkMasterRowUsed( _
+ByVal row As BOMRow)
+
+If row Is Nothing Then
+    Return
+End If
+
+If Not IsMasterRowUsed(row) Then
+
+    usedMasterRows.Add(row)
+
+End If
+
+End Sub
+
+' ################################################################
+' DOCUMENTO DA BOMROW
+' ################################################################
+
+Private Function GetBOMRowDocument( _
+ByVal row As BOMRow) _
+As Document
+
+If row Is Nothing Then
+    Return Nothing
+End If
+
+Try
+
+    If row.ComponentDefinitions.Count = 0 Then
+        Return Nothing
+    End If
+
+    For Each definition As ComponentDefinition _
+        In row.ComponentDefinitions
+
+        Try
+
+            If definition.Document IsNot Nothing Then
+
+                Return definition.Document
+
+            End If
+
+        Catch
+
+        End Try
+
+    Next
+
+Catch
+
+End Try
+
+Return Nothing
+
+End Function
+
+' ################################################################
+' PART NUMBER DA BOMROW
+' ################################################################
+
+Private Function GetBOMRowPartNumber( _
+ByVal row As BOMRow) _
+As String
+
+Dim doc As Document = _
+    GetBOMRowDocument(row)
+
+If doc Is Nothing Then
+    Return ""
+End If
+
+Return GetPartNumber(doc)
+
+End Function
+
+' ################################################################
+' PART NUMBER DO DOCUMENTO
+' ################################################################
+
+Private Function GetPartNumber( _
+ByVal doc As Document) _
+As String
+
+If doc Is Nothing Then
+    Return ""
+End If
+
+Try
+
+    Dim propertySet As PropertySet = _
+        doc.PropertySets.Item( _
+            "Design Tracking Properties")
+
+    Dim propertyValue As Inventor.Property = _
+        propertySet.Item("Part Number")
+
+    If propertyValue IsNot Nothing Then
+
+        If propertyValue.Value IsNot Nothing Then
+
+            Return _
+                propertyValue.Value.ToString().Trim()
+
+        End If
+
+    End If
+
+Catch
+
+End Try
+
+Return ""
+
+End Function
+
+' ################################################################
+' FULL FILE NAME
+' ################################################################
+
+Private Function SafeFullFileName( _
+ByVal doc As Document) _
+As String
+
+If doc Is Nothing Then
+    Return ""
+End If
+
+Try
+
+    Return doc.FullFileName.Trim()
+
+Catch
+
+    Return ""
+
+End Try
+
+End Function
+
+' ################################################################
+' ITEM NUMBER
+' ################################################################
+
+Private Function SafeItemNumber( _
+ByVal row As BOMRow) _
+As String
+
+If row Is Nothing Then
+    Return ""
+End If
+
+Try
+
+    Return row.ItemNumber.ToString().Trim()
+
+Catch
+
+    Return ""
+
+End Try
+
+End Function
+
+' ################################################################
+' COMPARAÇÃO DE PART NUMBERS
+' ################################################################
+
+Private Function SamePartNumber( _
+ByVal pn1 As String, _
+ByVal pn2 As String) _
+As Boolean
+
+If String.IsNullOrWhiteSpace(pn1) Then
+    Return False
+End If
+
+If String.IsNullOrWhiteSpace(pn2) Then
+    Return False
+End If
+
+Return String.Equals( _
+    pn1.Trim(), _
+    pn2.Trim(), _
+    StringComparison.OrdinalIgnoreCase)
+
+End Function
+
+' ################################################################
+' VERIFICAR SE É ASSEMBLY
+' ################################################################
+
+Private Function IsAssemblyDocument( _
+ByVal doc As Document) _
+As Boolean
+
+If doc Is Nothing Then
+    Return False
+End If
+
+Try
+
+    Return _
+        doc.DocumentType = _
+        DocumentTypeEnum.kAssemblyDocumentObject
+
+Catch
+
+    Return False
+
+End Try
+
+End Function
+
+' ################################################################
+' COMPARAR DOCUMENTOS
+' ################################################################
+
+Private Function SameDocument( _
+ByVal doc1 As Document, _
+ByVal doc2 As Document) _
+As Boolean
+
+If doc1 Is Nothing OrElse doc2 Is Nothing Then
+    Return False
+End If
+
+Dim file1 As String = _
+    SafeFullFileName(doc1)
+
+Dim file2 As String = _
+    SafeFullFileName(doc2)
+
+If Not String.IsNullOrWhiteSpace(file1) _
+    AndAlso _
+    Not String.IsNullOrWhiteSpace(file2) Then
+
+    Return String.Equals( _
+        file1, _
+        file2, _
+        StringComparison.OrdinalIgnoreCase)
+
+End If
+
+Return SamePartNumber( _
+    GetPartNumber(doc1), _
+    GetPartNumber(doc2))
+
+End Function
+
+' ################################################################
+' RESULTADO
+' ################################################################
+
+Private Sub ShowResults( _
+ByVal resultados As List(Of String), _
+ByVal alteracoes As Integer, _
+ByVal erros As Integer)
+
+Dim form As New Form
+
+form.Text = _
+    "SINCRONIZAÇÃO DE ITEM NUMBERS"
+
+form.Width = 1100
+
+form.Height = 700
+
+Dim richText As New RichTextBox
+
+richText.Dock = DockStyle.Fill
+
+richText.ReadOnly = True
+
+
+
+richText.AppendText( _
+    "RESULTADO DA SINCRONIZAÇÃO" _
+    & vbCrLf _
+    & "============================================" _
+    & vbCrLf _
+    & vbCrLf)
+
+For Each linha As String In resultados
+
+    richText.AppendText( _
+        linha _
+        & vbCrLf)
+
+Next
+
+form.Controls.Add(richText)
+
+form.ShowDialog()
+
+End Sub
